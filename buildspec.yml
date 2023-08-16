@@ -4,8 +4,8 @@ phases:
   install:
     runtime-versions:
       python: 3.11
-      commands:
-        - pip install -r /Project/requirements.txt
+    commands:
+      - pip install -r /Projects/requirements.txt
 
   pre_build:
     commands:
@@ -14,7 +14,7 @@ phases:
   build:
     commands:
       - echo "Running build commands..."
-      - pytest /Project/test_calculator.py
+      - pytest /Projects/test_calculator.py
 
 artifacts:
-  files: /Project/test_calculator.py
+  files: /Projects/test_calculator.py
