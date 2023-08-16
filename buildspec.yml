@@ -4,6 +4,8 @@ phases:
   install:
     runtime-versions:
       python: 3.11
+    commands:
+      -python3 -m venv 
   pre_build:
     commands:
       - echo Installing dependencies...
