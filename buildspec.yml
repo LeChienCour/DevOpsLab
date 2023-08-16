@@ -1,0 +1,14 @@
+version: 0.2
+
+phases:
+  install:
+    runtime-versions:
+      python: 3.8
+  pre_build:
+    commands:
+      - echo Installing dependencies...
+      - pip install -r /Projects/requirements.txt
+  build:
+    commands:
+      - echo Running tests...
+      - pytest /Projects/test_calculator.py
