@@ -89,6 +89,7 @@ Crea `docker-compose.yml` en la raíz con 2 servicios:
   - `DB_USER=taskuser`  
   - `DB_PASSWORD=taskpass123`
   - `DB_NAME=taskmanager`
+  - `JWT_SECRET=your_secret_key`
 - Depende de: `database`
 
 #### **Servicio: database**  
@@ -104,7 +105,6 @@ Crea `docker-compose.yml` en la raíz con 2 servicios:
 
 ### **Pistas para docker-compose.yml:**
 ```yaml
-# Pista: version: '3.8'
 # Pista: services:
 # Pista:   backend:
 # Pista:     build: ./backend
