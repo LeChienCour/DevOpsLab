@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Multistage Docker Lab</title>
+    <meta name="description" content="A demonstration of multistage Docker builds">
+</head>
+<body>
+    <div id="app">
+        <header class="header">
+            <h1 class="title">🐳 Multistage Docker Lab</h1>
+            <p class="subtitle">Demonstrating efficient Docker builds</p>
+        </header>
+        
+        <main class="main-content">
+            <section class="feature-section">
+                <h2>Why Multistage Builds?</h2>
+                <div class="features">
+                    <div class="feature-card">
+                        <h3>📦 Smaller Images</h3>
+                        <p>Build dependencies stay in build stage</p>
+                    </div>
+                    <div class="feature-card">
+                        <h3>🔒 Security</h3>
+                        <p>No build tools in production image</p>
+                    </div>
+                    <div class="feature-card">
+                        <h3>⚡ Performance</h3>
+                        <p>Faster deployments and pulls</p>
+                    </div>
+                </div>
+            </section>
+            
+            <section class="interactive-section">
+                <h2>Interactive Demo</h2>
+                <div class="demo-controls">
+                    <button id="colorBtn" class="btn">Change Theme</button>
+                    <button id="counterBtn" class="btn">Counter: <span id="counter">0</span></button>
+                </div>
+                <div class="build-info">
+                    <p>Build time: <span id="buildTime"></span></p>
+                    <p>Environment: <span id="environment">Production</span></p>
+                </div>
+            </section>
+        </main>
+        
+        <footer class="footer">
+            <p>Built with Webpack, SCSS, and ❤️</p>
+        </footer>
+    </div>
+</body>
+</html> 

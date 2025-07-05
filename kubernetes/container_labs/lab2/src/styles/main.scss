@@ -1,0 +1,233 @@
+// Variables
+$primary-color: #2563eb;
+$secondary-color: #7c3aed;
+$success-color: #10b981;
+$warning-color: #f59e0b;
+$light-bg: #f8fafc;
+$dark-bg: #1e293b;
+$text-light: #334155;
+$text-dark: #e2e8f0;
+$border-radius: 12px;
+$box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+$transition: all 0.3s ease;
+
+// Base styles
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+    line-height: 1.6;
+    color: $text-light;
+    background: linear-gradient(135deg, $light-bg 0%, #ffffff 100%);
+    min-height: 100vh;
+    transition: $transition;
+
+    &.dark-theme {
+        color: $text-dark;
+        background: linear-gradient(135deg, $dark-bg 0%, #0f172a 100%);
+
+        .feature-card {
+            background: rgba(255, 255, 255, 0.1);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+        }
+
+        .btn {
+            background: rgba(255, 255, 255, 0.1);
+            color: $text-dark;
+            border: 1px solid rgba(255, 255, 255, 0.2);
+
+            &:hover {
+                background: rgba(255, 255, 255, 0.2);
+            }
+        }
+    }
+}
+
+#app {
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 2rem;
+}
+
+// Header styles
+.header {
+    text-align: center;
+    margin-bottom: 3rem;
+
+    .title {
+        font-size: 3rem;
+        font-weight: 700;
+        background: linear-gradient(45deg, $primary-color, $secondary-color);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        background-clip: text;
+        margin-bottom: 0.5rem;
+    }
+
+    .subtitle {
+        font-size: 1.2rem;
+        opacity: 0.7;
+    }
+}
+
+// Main content
+.main-content {
+    display: grid;
+    gap: 3rem;
+}
+
+// Feature section
+.feature-section {
+    h2 {
+        text-align: center;
+        font-size: 2rem;
+        margin-bottom: 2rem;
+        color: $primary-color;
+    }
+
+    .features {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+        gap: 2rem;
+    }
+
+    .feature-card {
+        background: white;
+        padding: 2rem;
+        border-radius: $border-radius;
+        box-shadow: $box-shadow;
+        border: 1px solid rgba(0, 0, 0, 0.05);
+        transition: $transition;
+        opacity: 0;
+        transform: translateY(20px);
+
+        &.animate-in {
+            opacity: 1;
+            transform: translateY(0);
+        }
+
+        &:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.1);
+        }
+
+        h3 {
+            font-size: 1.3rem;
+            margin-bottom: 1rem;
+            color: $primary-color;
+        }
+
+        p {
+            opacity: 0.8;
+        }
+    }
+}
+
+// Interactive section
+.interactive-section {
+    text-align: center;
+    background: white;
+    padding: 2rem;
+    border-radius: $border-radius;
+    box-shadow: $box-shadow;
+
+    h2 {
+        font-size: 2rem;
+        margin-bottom: 2rem;
+        color: $secondary-color;
+    }
+
+    .demo-controls {
+        display: flex;
+        gap: 1rem;
+        justify-content: center;
+        margin-bottom: 2rem;
+        flex-wrap: wrap;
+    }
+
+    .btn {
+        padding: 0.75rem 1.5rem;
+        border: none;
+        border-radius: $border-radius;
+        background: linear-gradient(45deg, $primary-color, $secondary-color);
+        color: white;
+        font-weight: 600;
+        cursor: pointer;
+        transition: $transition;
+        font-size: 1rem;
+
+        &:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(0, 0, 0, 0.2);
+        }
+
+        &:active {
+            transform: translateY(0);
+        }
+    }
+
+    .build-info {
+        background: $light-bg;
+        padding: 1rem;
+        border-radius: $border-radius;
+        font-family: 'Courier New', monospace;
+        font-size: 0.9rem;
+
+        p {
+            margin: 0.5rem 0;
+        }
+
+        span {
+            font-weight: 600;
+            color: $success-color;
+        }
+    }
+}
+
+// Footer
+.footer {
+    text-align: center;
+    margin-top: 3rem;
+    padding: 2rem;
+    opacity: 0.6;
+    font-size: 0.9rem;
+}
+
+// Animations
+@keyframes pulse {
+    0%, 100% { transform: scale(1); }
+    50% { transform: scale(1.1); }
+}
+
+.pulse {
+    animation: pulse 0.3s ease;
+}
+
+// Responsive design
+@media (max-width: 768px) {
+    #app {
+        padding: 1rem;
+    }
+
+    .header .title {
+        font-size: 2rem;
+    }
+
+    .features {
+        grid-template-columns: 1fr;
+    }
+
+    .demo-controls {
+        flex-direction: column;
+        align-items: center;
+    }
+
+    .btn {
+        width: 100%;
+        max-width: 300px;
+    }
+} 
