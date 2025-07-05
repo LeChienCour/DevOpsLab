@@ -160,11 +160,5 @@ cython_debug/
 #.idea/
 
 # Ignore Dockerfiles and docker-compose files in kubernetes and all subdirectories
-kubernetes/container_labs/lab1/Dockerfile
-kubernetes/container_labs/lab2/Dockerfile
-kubernetes/container_labs/lab3/Dockerfile
-kubernetes/container_labs/lab3/docker-compose.yml
-kubernetes/container_labs/lab4/Dockerfile
-kubernetes/container_labs/lab4/docker-compose.yml
-kubernetes/container_labs/lab5/Dockerfile
-kubernetes/container_labs/lab5/docker-compose.yml
+kubernetes/**/Dockerfile
+kubernetes/**/docker-compose*
