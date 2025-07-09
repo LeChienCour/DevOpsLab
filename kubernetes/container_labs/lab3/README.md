@@ -73,6 +73,10 @@ docker build -t taskmanager-backend ./backend
 docker run -p 5000:5000 taskmanager-backend
 ```
 
+#### 📚 Hint de documentación:
+- [Docker Docs: Dockerfile reference](https://docs.docker.com/engine/reference/builder/)
+- [Node.js Docker Best Practices](https://nodejs.org/en/docs/guides/nodejs-docker-webapp/)
+
 ---
 
 ## 🎓 **DESAFÍO 2: Crear docker-compose.yml**
@@ -120,6 +124,10 @@ Crea `docker-compose.yml` en la raíz con 2 servicios:
 # Pista:   postgres_data:
 ```
 
+#### 📚 Hint de documentación:
+- [Docker Compose Docs: Compose file reference](https://docs.docker.com/compose/compose-file/)
+- [Docker Compose Docs: Environment variables in Compose](https://docs.docker.com/compose/environment-variables/)
+
 ---
 
 ## 🚦 **DESAFÍO 3: Ejecutar y Probar**
@@ -159,6 +167,10 @@ curl -X POST http://localhost:5000/auth/login \
   -H "Content-Type: application/json" \
   -d '{"username":"test","password":"123456"}'
 ```
+
+#### 📚 Hint de documentación:
+- [Docker Compose Docs: Command-line reference](https://docs.docker.com/compose/reference/)
+- [PostgreSQL Docker Docs](https://hub.docker.com/_/postgres)
 
 ---
 
