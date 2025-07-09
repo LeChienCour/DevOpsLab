@@ -91,6 +91,11 @@ FROM nginx:alpine AS production
 # ... tu código aquí
 ```
 
+#### 📚 Hint de documentación:
+- [Docker Multi-stage Builds](https://docs.docker.com/develop/dev-best-practices/#use-multi-stage-builds)
+- [Dockerfile reference](https://docs.docker.com/engine/reference/builder/)
+- [Nginx Official Documentation](https://nginx.org/en/docs/)
+
 ---
 
 ## 🎓 **DESAFÍO 2: Backend con Optimización**
@@ -110,6 +115,11 @@ FROM nginx:alpine AS production
 - Usar `npm ci` en lugar de `npm install`
 - Minimizar capas de imagen
 - Implementar graceful shutdown
+
+#### 📚 Hint de documentación:
+- [Docker Multi-stage Builds](https://docs.docker.com/develop/dev-best-practices/#use-multi-stage-builds)
+- [Dockerfile Best Practices](https://docs.docker.com/develop/dev-best-practices/)
+- [Docker Health Checks](https://docs.docker.com/engine/reference/builder/#healthcheck)
 
 ---
 
@@ -160,6 +170,12 @@ deploy:
       cpus: '0.5'
 ```
 
+#### 📚 Hint de documentación:
+- [Docker Compose File Reference](https://docs.docker.com/compose/compose-file/)
+- [Docker Compose CLI Reference](https://docs.docker.com/compose/reference/)
+- [Docker Custom Networks](https://docs.docker.com/network/bridge/)
+- [Docker Health Checks](https://docs.docker.com/engine/reference/builder/#healthcheck)
+
 ---
 
 ## 🎓 **DESAFÍO 4: Proxy y SSL**
@@ -180,6 +196,12 @@ deploy:
 - **Security headers**: XSS, CSRF protección
 - **Rate limiting**: Anti-DDoS básico
 
+#### 📚 Hint de documentación:
+- [Nginx Official Documentation](https://nginx.org/en/docs/)
+- [Nginx Reverse Proxy Guide](https://docs.nginx.com/nginx/admin-guide/web-server/reverse-proxy/)
+- [Nginx SSL/TLS Guide](https://docs.nginx.com/nginx/admin-guide/security-controls/terminating-ssl-http/)
+- [Nginx Rate Limiting](https://docs.nginx.com/nginx/admin-guide/security-controls/controlling-access-proxied-http/)
+
 ---
 
 ## 🎓 **DESAFÍO 5: Monitoreo Completo**
@@ -197,6 +219,12 @@ deploy:
 - Búsqueda y filtrado
 - Alertas por errores
 - Retención de logs
+
+#### 📚 Hint de documentación:
+- [Prometheus Official Documentation](https://prometheus.io/docs/)
+- [Grafana Documentation](https://grafana.com/docs/)
+- [Docker Metrics with Prometheus](https://docs.docker.com/config/daemon/prometheus/)
+- [Node.js Monitoring with Prometheus](https://prometheus.io/docs/guides/node-exporter/)
 
 ---
 
@@ -216,6 +244,11 @@ deploy:
 - Logs centralizados  
 - Configuraciones
 - Certificados SSL
+
+#### 📚 Hint de documentación:
+- [Docker Volumes](https://docs.docker.com/storage/volumes/)
+- [PostgreSQL Backup Guide](https://www.postgresql.org/docs/current/backup.html)
+- [Docker Backup Strategies](https://docs.docker.com/storage/volumes/#backup-restore-or-migrate-data-volumes)
 
 ---
 

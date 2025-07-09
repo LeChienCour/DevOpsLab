@@ -4,11 +4,17 @@
   "type": "module",
   "description": "TaskFlow Frontend - Advanced Docker Lab",
   "scripts": {
-    "dev": "vite --host 0.0.0.0 --port 3000",
-    "build": "tsc && vite build",
-    "preview": "vite preview",
-    "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0",
-    "type-check": "tsc --noEmit"
+    "clean": "rimraf dist logs/*",
+    "dev": "nodemon server.js",
+    "start": "node server.js",
+    "start:prod": "NODE_ENV=production node server.js",
+    "test": "echo Test",
+    "test:coverage": "jest --coverage",
+    "lint": "eslint . --ext js,ts",
+    "format": "prettier --write .",
+    "health": "node -e \"require('http').get('http://localhost:4000/health', res => process.exit(res.statusCode === 200 ? 0 : 1))\"",
+    "migrate": "node src/database/migrate.js",
+    "seed": "node src/database/seed.js"
   },
   "dependencies": {
     "@reduxjs/toolkit": "^1.9.5",
@@ -31,7 +37,9 @@
     "eslint-plugin-react-hooks": "^4.6.0",
     "eslint-plugin-react-refresh": "^0.4.3",
     "typescript": "^5.0.2",
-    "vite": "^4.4.5"
+    "vite": "^4.4.5",
+    "rimraf": "^5.0.1",
+    "prettier": "^3.0.0"
   },
   "engines": {
     "node": ">=18.0.0"
