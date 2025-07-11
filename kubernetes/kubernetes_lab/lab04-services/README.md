@@ -41,7 +41,7 @@
 - Get the Service's ClusterIP or external IP (if using NodePort/LoadBalancer)
 
 ### 4. Access the Application
-- For ClusterIP: Use `kubectl port-forward` to access the service locally.
+- For ClusterIP: Use `kubectl port-forward service/<your-service-name> 8080:80` to access the service locally.
 - For NodePort/LoadBalancer: Access via the node's IP and assigned port.
 
 ### 5. Clean Up

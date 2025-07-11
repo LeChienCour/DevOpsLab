@@ -19,12 +19,30 @@
 ### 2. Create a ConfigMap
 - Create a file named `configmap.yaml` in this directory.
 - Define a ConfigMap with at least one key-value pair (e.g., `APP_COLOR=blue`).
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: my-config
+data:
+  # Add your key-value pairs here
+  example.property: "value"
+```
 - Apply it: `kubectl apply -f configmap.yaml`
 - View it: `kubectl get configmaps` and `kubectl describe configmap <name>`
 
 ### 3. Create a Secret
 - Create a file named `secret.yaml` in this directory.
 - Define a Secret with at least one key-value pair (e.g., `DB_PASSWORD=yourpassword`).
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: my-secret
+type: Opaque
+data:
+    DB_PASSWORD=yourpassword (BASE 64)
+```
 - Apply it: `kubectl apply -f secret.yaml`
 - View it: `kubectl get secrets` and `kubectl describe secret <name>`
 
