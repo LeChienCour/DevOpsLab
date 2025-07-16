@@ -1,0 +1,215 @@
+version: 0.2
+
+# Docker Build Environment Specification
+# This buildspec is optimized for containerized applications with multi-stage builds
+
+env:
+  variables:
+    DOCKER_BUILDKIT: 1
+    COMPOSE_DOCKER_CLI_BUILD: 1
+    IMAGE_REPO_NAME: my-app
+    IMAGE_TAG: latest
+  parameter-store:
+    # Example: Retrieve Docker Hub credentials from Parameter Store
+    # DOCKER_HUB_USERNAME: /myapp/docker-hub-username
+    # DOCKER_HUB_PASSWORD: /myapp/docker-hub-password
+
+phases:
+  install:
+    runtime-versions:
+      docker: 20
+    commands:
+      - echo "Setting up Docker build environment..."
+      - docker --version
+      - docker-compose --version
+      
+      # Install additional tools
+      - echo "Installing additional tools..."
+      - curl -L "https://github.com/docker/compose/releases/download/1.29.2/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+      - chmod +x /usr/local/bin/docker-compose
+      
+      # Install security scanning tools
+      - echo "Installing security scanning tools..."
+      - curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
+
+  pre_build:
+    commands:
+      - echo "Running pre-build tasks..."
+      - echo "Build started on $(date)"
+      
+      # Login to Amazon ECR
+      - echo "Logging in to Amazon ECR..."
+      - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com
+      
+      # Set image URI
+      - REPOSITORY_URI=$AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$IMAGE_REPO_NAME
+      - IMAGE_URI=$REPOSITORY_URI:$IMAGE_TAG
+      - COMMIT_HASH=$(echo $CODEBUILD_RESOLVED_SOURCE_VERSION | cut -c 1-7)
+      - IMAGE_URI_COMMIT=$REPOSITORY_URI:$COMMIT_HASH
+      
+      # Dockerfile linting
+      - echo "Linting Dockerfile..."
+      - |
+        if [ -f Dockerfile ]; then
+          docker run --rm -i hadolint/hadolint < Dockerfile || true
+        fi
+      
+      # Docker Compose validation
+      - |
+        if [ -f docker-compose.yml ]; then
+          echo "Validating docker-compose.yml..."
+          docker-compose config -q
+        fi
+
+  build:
+    commands:
+      - echo "Starting build phase..."
+      
+      # Build Docker image with BuildKit optimizations
+      - echo "Building Docker image..."
+      - |
+        if [ -f docker-compose.yml ]; then
+          echo "Building with Docker Compose..."
+          docker-compose build
+        else
+          echo "Building with Docker..."
+          docker build \
+            --build-arg BUILDKIT_INLINE_CACHE=1 \
+            --cache-from $IMAGE_URI \
+            --tag $IMAGE_URI \
+            --tag $IMAGE_URI_COMMIT \
+            .
+        fi
+      
+      # Run container security scan
+      - echo "Running security scan on Docker image..."
+      - trivy image --exit-code 0 --severity HIGH,CRITICAL --format json --output trivy-report.json $IMAGE_URI || true
+      
+      # Test the built image
+      - echo "Testing Docker image..."
+      - |
+        if [ -f docker-compose.test.yml ]; then
+          echo "Running tests with Docker Compose..."
+          docker-compose -f docker-compose.test.yml run --rm test
+        else
+          echo "Running basic container test..."
+          docker run --rm $IMAGE_URI echo "Container test passed"
+        fi
+      
+      # Generate SBOM (Software Bill of Materials)
+      - echo "Generating Software Bill of Materials..."
+      - docker run --rm -v /var/run/docker.sock:/var/run/docker.sock anchore/syft:latest $IMAGE_URI -o json > sbom.json || true
+      
+      # Generate build metadata
+      - echo "Generating build metadata..."
+      - |
+        cat > build-info.json << EOF
+        {
+          "buildTime": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+          "commitHash": "$CODEBUILD_RESOLVED_SOURCE_VERSION",
+          "buildId": "$CODEBUILD_BUILD_ID",
+          "imageUri": "$IMAGE_URI",
+          "imageUriCommit": "$IMAGE_URI_COMMIT",
+          "dockerVersion": "$(docker --version)"
+        }
+        EOF
+
+  post_build:
+    commands:
+      - echo "Post-build phase started..."
+      
+      # Push image to ECR
+      - echo "Pushing Docker image to ECR..."
+      - docker push $IMAGE_URI
+      - docker push $IMAGE_URI_COMMIT
+      
+      # Update image definitions for ECS deployment
+      - echo "Creating imagedefinitions.json for ECS deployment..."
+      - |
+        cat > imagedefinitions.json << EOF
+        [
+          {
+            "name": "$IMAGE_REPO_NAME",
+            "imageUri": "$IMAGE_URI"
+          }
+        ]
+        EOF
+      
+      # Generate Kubernetes deployment manifest
+      - echo "Generating Kubernetes deployment manifest..."
+      - |
+        cat > k8s-deployment.yaml << EOF
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: $IMAGE_REPO_NAME
+          labels:
+            app: $IMAGE_REPO_NAME
+        spec:
+          replicas: 2
+          selector:
+            matchLabels:
+              app: $IMAGE_REPO_NAME
+          template:
+            metadata:
+              labels:
+                app: $IMAGE_REPO_NAME
+            spec:
+              containers:
+              - name: $IMAGE_REPO_NAME
+                image: $IMAGE_URI
+                ports:
+                - containerPort: 8080
+                resources:
+                  requests:
+                    memory: "128Mi"
+                    cpu: "100m"
+                  limits:
+                    memory: "256Mi"
+                    cpu: "200m"
+        ---
+        apiVersion: v1
+        kind: Service
+        metadata:
+          name: $IMAGE_REPO_NAME-service
+        spec:
+          selector:
+            app: $IMAGE_REPO_NAME
+          ports:
+          - port: 80
+            targetPort: 8080
+          type: LoadBalancer
+        EOF
+      
+      # Clean up local images to save space
+      - echo "Cleaning up local Docker images..."
+      - docker image prune -f
+      
+      - echo "Build completed on $(date)"
+
+# Cache configuration for Docker layer caching
+cache:
+  paths:
+    - '/var/lib/docker/**/*'
+
+artifacts:
+  files:
+    - 'imagedefinitions.json'
+    - 'k8s-deployment.yaml'
+  secondary-artifacts:
+    security-reports:
+      files:
+        - 'trivy-report.json'
+        - 'sbom.json'
+      base-directory: '.'
+    build-metadata:
+      files:
+        - 'build-info.json'
+      base-directory: '.'
+
+reports:
+  trivy-reports:
+    files:
+      - 'trivy-report.json'
+    file-format: 'SARIF'
+    base-directory: '.'

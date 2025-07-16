@@ -1,0 +1,126 @@
+version: 0.2
+
+# Node.js Build Environment Specification
+# This buildspec is optimized for Node.js applications with npm/yarn package management
+
+env:
+  variables:
+    NODE_ENV: production
+    NPM_CONFIG_CACHE: /tmp/.npm
+    YARN_CACHE_FOLDER: /tmp/.yarn-cache
+  parameter-store:
+    # Example: Retrieve API keys from Parameter Store
+    # API_KEY: /myapp/api-key
+
+phases:
+  install:
+    runtime-versions:
+      nodejs: 18
+    commands:
+      - echo "Installing Node.js dependencies..."
+      - node --version
+      - npm --version
+      
+      # Install global tools
+      - npm install -g yarn typescript eslint jest
+      
+      # Install project dependencies with caching
+      - |
+        if [ -f yarn.lock ]; then
+          echo "Using Yarn for dependency management"
+          yarn install --frozen-lockfile --cache-folder $YARN_CACHE_FOLDER
+        else
+          echo "Using npm for dependency management"
+          npm ci --cache $NPM_CONFIG_CACHE
+        fi
+
+  pre_build:
+    commands:
+      - echo "Running pre-build tasks..."
+      - echo "Build started on $(date)"
+      
+      # Lint the code
+      - echo "Running ESLint..."
+      - npx eslint src/ --ext .js,.ts,.jsx,.tsx || true
+      
+      # Type checking for TypeScript projects
+      - |
+        if [ -f tsconfig.json ]; then
+          echo "Running TypeScript compiler check..."
+          npx tsc --noEmit
+        fi
+
+  build:
+    commands:
+      - echo "Starting build phase..."
+      
+      # Run tests
+      - echo "Running unit tests..."
+      - npm test -- --coverage --watchAll=false
+      
+      # Build the application
+      - echo "Building application..."
+      - |
+        if [ -f package.json ] && grep -q '"build"' package.json; then
+          npm run build
+        else
+          echo "No build script found, skipping build step"
+        fi
+      
+      # Generate build metadata
+      - echo "Generating build metadata..."
+      - |
+        cat > build-info.json << EOF
+        {
+          "buildTime": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+          "commitHash": "$CODEBUILD_RESOLVED_SOURCE_VERSION",
+          "buildId": "$CODEBUILD_BUILD_ID",
+          "nodeVersion": "$(node --version)",
+          "npmVersion": "$(npm --version)"
+        }
+        EOF
+
+  post_build:
+    commands:
+      - echo "Post-build phase started..."
+      
+      # Security audit
+      - echo "Running security audit..."
+      - npm audit --audit-level moderate || true
+      
+      # Bundle analysis (if webpack-bundle-analyzer is available)
+      - |
+        if npm list webpack-bundle-analyzer > /dev/null 2>&1; then
+          echo "Generating bundle analysis..."
+          npm run analyze || true
+        fi
+      
+      - echo "Build completed on $(date)"
+
+# Cache configuration for faster builds
+cache:
+  paths:
+    - '/tmp/.npm/**/*'
+    - '/tmp/.yarn-cache/**/*'
+    - 'node_modules/**/*'
+
+artifacts:
+  files:
+    - '**/*'
+  base-directory: 'dist'
+  secondary-artifacts:
+    coverage-report:
+      files:
+        - 'coverage/**/*'
+      base-directory: '.'
+    build-metadata:
+      files:
+        - 'build-info.json'
+      base-directory: '.'
+
+reports:
+  jest-reports:
+    files:
+      - 'coverage/lcov.info'
+    file-format: 'CLOVERXML'
+    base-directory: '.'

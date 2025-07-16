@@ -1,0 +1,533 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Advanced CodeBuild projects with custom build environments, caching, and parallel builds'
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: 'advanced-codebuild-lab'
+    Description: 'Name of the project for resource naming'
+  
+  ArtifactBucketName:
+    Type: String
+    Description: 'S3 bucket name for build artifacts (must be globally unique)'
+  
+  CacheBucketName:
+    Type: String
+    Description: 'S3 bucket name for build caching (must be globally unique)'
+  
+  ECRRepositoryName:
+    Type: String
+    Default: 'codebuild-custom-images'
+    Description: 'ECR repository name for custom build images'
+
+Resources:
+  # S3 Bucket for Build Artifacts
+  ArtifactStore:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref ArtifactBucketName
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # S3 Bucket for Build Caching
+  CacheStore:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref CacheBucketName
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteOldCacheObjects
+            Status: Enabled
+            ExpirationInDays: 30
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # ECR Repository for Custom Build Images
+  ECRRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Ref ECRRepositoryName
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Keep last 10 images",
+                "selection": {
+                  "tagStatus": "any",
+                  "countType": "imageCountMoreThan",
+                  "countNumber": 10
+                },
+                "action": {
+                  "type": "expire"
+                }
+              }
+            ]
+          }
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # IAM Role for CodeBuild Projects
+  CodeBuildServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-codebuild-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CodeBuildServicePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # CloudWatch Logs permissions
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/*'
+              
+              # S3 permissions for artifacts and caching
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                  - s3:PutObject
+                  - s3:DeleteObject
+                Resource:
+                  - !Sub '${ArtifactStore}/*'
+                  - !Sub '${CacheStore}/*'
+              - Effect: Allow
+                Action:
+                  - s3:ListBucket
+                Resource:
+                  - !GetAtt ArtifactStore.Arn
+                  - !GetAtt CacheStore.Arn
+              
+              # ECR permissions for custom images
+              - Effect: Allow
+                Action:
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:BatchGetImage
+                  - ecr:GetAuthorizationToken
+                Resource: '*'
+              
+              # CodeBuild permissions for batch builds
+              - Effect: Allow
+                Action:
+                  - codebuild:CreateReportGroup
+                  - codebuild:CreateReport
+                  - codebuild:UpdateReport
+                  - codebuild:BatchPutTestCases
+                  - codebuild:BatchPutCodeCoverages
+                Resource: !Sub 'arn:aws:codebuild:${AWS::Region}:${AWS::AccountId}:report-group/*'
+              
+              # Systems Manager Parameter Store (for secrets)
+              - Effect: Allow
+                Action:
+                  - ssm:GetParameters
+                  - ssm:GetParameter
+                Resource: !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${ProjectName}/*'
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName  # Node.js
+ Build Project with Caching
+  NodeJSBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub '${ProjectName}-nodejs'
+      Description: 'Node.js build project with npm/yarn caching'
+      ServiceRole: !GetAtt CodeBuildServiceRole.Arn
+      Artifacts:
+        Type: S3
+        Location: !Sub '${ArtifactStore}/nodejs-artifacts'
+        Packaging: ZIP
+      Cache:
+        Type: S3
+        Location: !Sub '${CacheStore}/nodejs-cache'
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_MEDIUM
+        Image: aws/codebuild/amazonlinux2-x86_64-standard:4.0
+        EnvironmentVariables:
+          - Name: NODE_ENV
+            Value: production
+          - Name: NPM_CONFIG_CACHE
+            Value: /tmp/.npm
+          - Name: YARN_CACHE_FOLDER
+            Value: /tmp/.yarn-cache
+      Source:
+        Type: S3
+        Location: !Sub '${ArtifactStore}/source.zip'
+        BuildSpec: 'buildspecs/buildspec-nodejs.yml'
+      TimeoutInMinutes: 30
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: BuildType
+          Value: NodeJS
+
+  # Python Build Project with Caching
+  PythonBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub '${ProjectName}-python'
+      Description: 'Python build project with pip/poetry caching'
+      ServiceRole: !GetAtt CodeBuildServiceRole.Arn
+      Artifacts:
+        Type: S3
+        Location: !Sub '${ArtifactStore}/python-artifacts'
+        Packaging: ZIP
+      Cache:
+        Type: S3
+        Location: !Sub '${CacheStore}/python-cache'
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_MEDIUM
+        Image: aws/codebuild/amazonlinux2-x86_64-standard:4.0
+        EnvironmentVariables:
+          - Name: PYTHON_ENV
+            Value: production
+          - Name: PIP_CACHE_DIR
+            Value: /tmp/.pip-cache
+          - Name: POETRY_CACHE_DIR
+            Value: /tmp/.poetry-cache
+      Source:
+        Type: S3
+        Location: !Sub '${ArtifactStore}/source.zip'
+        BuildSpec: 'buildspecs/buildspec-python.yml'
+      TimeoutInMinutes: 30
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: BuildType
+          Value: Python
+
+  # Java Build Project with Maven/Gradle Caching
+  JavaBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub '${ProjectName}-java'
+      Description: 'Java build project with Maven/Gradle caching'
+      ServiceRole: !GetAtt CodeBuildServiceRole.Arn
+      Artifacts:
+        Type: S3
+        Location: !Sub '${ArtifactStore}/java-artifacts'
+        Packaging: ZIP
+      Cache:
+        Type: S3
+        Location: !Sub '${CacheStore}/java-cache'
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_LARGE
+        Image: aws/codebuild/amazonlinux2-x86_64-standard:4.0
+        EnvironmentVariables:
+          - Name: MAVEN_OPTS
+            Value: -Xmx1024m
+          - Name: GRADLE_OPTS
+            Value: -Xmx1024m -Dorg.gradle.daemon=false
+          - Name: MAVEN_CACHE_DIR
+            Value: /tmp/.m2
+          - Name: GRADLE_CACHE_DIR
+            Value: /tmp/.gradle
+      Source:
+        Type: S3
+        Location: !Sub '${ArtifactStore}/source.zip'
+        BuildSpec: 'buildspecs/buildspec-java.yml'
+      TimeoutInMinutes: 45
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: BuildType
+          Value: Java
+
+  # Docker Build Project with Layer Caching
+  DockerBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub '${ProjectName}-docker'
+      Description: 'Docker build project with layer caching and ECR integration'
+      ServiceRole: !GetAtt CodeBuildServiceRole.Arn
+      Artifacts:
+        Type: S3
+        Location: !Sub '${ArtifactStore}/docker-artifacts'
+        Packaging: ZIP
+      Cache:
+        Type: LOCAL
+        Modes:
+          - LOCAL_DOCKER_LAYER_CACHE
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_LARGE
+        Image: aws/codebuild/amazonlinux2-x86_64-standard:4.0
+        PrivilegedMode: true
+        EnvironmentVariables:
+          - Name: AWS_DEFAULT_REGION
+            Value: !Ref AWS::Region
+          - Name: AWS_ACCOUNT_ID
+            Value: !Ref AWS::AccountId
+          - Name: IMAGE_REPO_NAME
+            Value: !Ref ECRRepositoryName
+          - Name: DOCKER_BUILDKIT
+            Value: '1'
+      Source:
+        Type: S3
+        Location: !Sub '${ArtifactStore}/source.zip'
+        BuildSpec: 'buildspecs/buildspec-docker.yml'
+      TimeoutInMinutes: 60
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: BuildType
+          Value: Docker
+
+  # Parallel Build Project for Multi-Component Applications
+  ParallelBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub '${ProjectName}-parallel'
+      Description: 'Parallel build project for multi-component applications'
+      ServiceRole: !GetAtt CodeBuildServiceRole.Arn
+      Artifacts:
+        Type: S3
+        Location: !Sub '${ArtifactStore}/parallel-artifacts'
+        Packaging: ZIP
+      Cache:
+        Type: S3
+        Location: !Sub '${CacheStore}/parallel-cache'
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_XLARGE  # Larger instance for parallel processing
+        Image: aws/codebuild/amazonlinux2-x86_64-standard:4.0
+        EnvironmentVariables:
+          - Name: PARALLEL_JOBS
+            Value: '4'
+          - Name: BUILD_ENV
+            Value: production
+      Source:
+        Type: S3
+        Location: !Sub '${ArtifactStore}/source.zip'
+        BuildSpec: 'buildspecs/buildspec-parallel.yml'
+      TimeoutInMinutes: 45
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: BuildType
+          Value: Parallel
+
+  # Custom Build Image Project
+  CustomImageBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub '${ProjectName}-custom-image'
+      Description: 'Build project using custom Docker image from ECR'
+      ServiceRole: !GetAtt CodeBuildServiceRole.Arn
+      Artifacts:
+        Type: S3
+        Location: !Sub '${ArtifactStore}/custom-artifacts'
+        Packaging: ZIP
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_MEDIUM
+        Image: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${ECRRepositoryName}:latest'
+        ImagePullCredentialsType: SERVICE_ROLE
+        EnvironmentVariables:
+          - Name: CUSTOM_BUILD_ENV
+            Value: 'true'
+      Source:
+        Type: S3
+        Location: !Sub '${ArtifactStore}/source.zip'
+        BuildSpec: |
+          version: 0.2
+          phases:
+            pre_build:
+              commands:
+                - echo "Using custom build image"
+                - echo "Build started on $(date)"
+            build:
+              commands:
+                - echo "Running custom build process..."
+                - echo "Custom tools and dependencies are pre-installed in this image"
+            post_build:
+              commands:
+                - echo "Build completed on $(date)"
+          artifacts:
+            files:
+              - '**/*'
+      TimeoutInMinutes: 30
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: BuildType
+          Value: CustomImage
+
+  # Batch Build Project for Running Multiple Builds
+  BatchBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub '${ProjectName}-batch'
+      Description: 'Batch build project for running multiple build configurations'
+      ServiceRole: !GetAtt CodeBuildServiceRole.Arn
+      Artifacts:
+        Type: S3
+        Location: !Sub '${ArtifactStore}/batch-artifacts'
+        Packaging: ZIP
+      BatchConfig:
+        ServiceRole: !GetAtt CodeBuildServiceRole.Arn
+        Restrictions:
+          MaximumBuildsAllowed: 5
+          ComputeTypesAllowed:
+            - BUILD_GENERAL1_SMALL
+            - BUILD_GENERAL1_MEDIUM
+            - BUILD_GENERAL1_LARGE
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_MEDIUM
+        Image: aws/codebuild/amazonlinux2-x86_64-standard:4.0
+      Source:
+        Type: S3
+        Location: !Sub '${ArtifactStore}/source.zip'
+        BuildSpec: |
+          version: 0.2
+          batch:
+            fast-fail: false
+            build-list:
+              - identifier: nodejs-build
+                env:
+                  variables:
+                    BUILD_TYPE: nodejs
+                buildspec: buildspecs/buildspec-nodejs.yml
+              - identifier: python-build
+                env:
+                  variables:
+                    BUILD_TYPE: python
+                buildspec: buildspecs/buildspec-python.yml
+              - identifier: java-build
+                env:
+                  variables:
+                    BUILD_TYPE: java
+                buildspec: buildspecs/buildspec-java.yml
+      TimeoutInMinutes: 60
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: BuildType
+          Value: Batch
+
+  # CloudWatch Log Groups for Build Projects
+  NodeJSLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/codebuild/${ProjectName}-nodejs'
+      RetentionInDays: 14
+
+  PythonLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/codebuild/${ProjectName}-python'
+      RetentionInDays: 14
+
+  JavaLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/codebuild/${ProjectName}-java'
+      RetentionInDays: 14
+
+  DockerLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/codebuild/${ProjectName}-docker'
+      RetentionInDays: 14
+
+  ParallelLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/codebuild/${ProjectName}-parallel'
+      RetentionInDays: 14
+
+Outputs:
+  NodeJSBuildProject:
+    Description: 'Node.js CodeBuild project name'
+    Value: !Ref NodeJSBuildProject
+    Export:
+      Name: !Sub '${AWS::StackName}-NodeJSBuildProject'
+
+  PythonBuildProject:
+    Description: 'Python CodeBuild project name'
+    Value: !Ref PythonBuildProject
+    Export:
+      Name: !Sub '${AWS::StackName}-PythonBuildProject'
+
+  JavaBuildProject:
+    Description: 'Java CodeBuild project name'
+    Value: !Ref JavaBuildProject
+    Export:
+      Name: !Sub '${AWS::StackName}-JavaBuildProject'
+
+  DockerBuildProject:
+    Description: 'Docker CodeBuild project name'
+    Value: !Ref DockerBuildProject
+    Export:
+      Name: !Sub '${AWS::StackName}-DockerBuildProject'
+
+  ParallelBuildProject:
+    Description: 'Parallel CodeBuild project name'
+    Value: !Ref ParallelBuildProject
+    Export:
+      Name: !Sub '${AWS::StackName}-ParallelBuildProject'
+
+  BatchBuildProject:
+    Description: 'Batch CodeBuild project name'
+    Value: !Ref BatchBuildProject
+    Export:
+      Name: !Sub '${AWS::StackName}-BatchBuildProject'
+
+  ECRRepository:
+    Description: 'ECR repository URI for custom build images'
+    Value: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${ECRRepositoryName}'
+    Export:
+      Name: !Sub '${AWS::StackName}-ECRRepository'
+
+  ArtifactBucket:
+    Description: 'S3 bucket for build artifacts'
+    Value: !Ref ArtifactStore
+    Export:
+      Name: !Sub '${AWS::StackName}-ArtifactBucket'
+
+  CacheBucket:
+    Description: 'S3 bucket for build caching'
+    Value: !Ref CacheStore
+    Export:
+      Name: !Sub '${AWS::StackName}-CacheBucket'

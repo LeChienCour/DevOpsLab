@@ -1,0 +1,168 @@
+labs:
+  cicd-codepipeline:
+    name: "CodePipeline Multi-Stage Pipeline"
+    description: "Create and manage multi-stage CI/CD pipelines with source, build, test, and deploy stages"
+    category: "cicd"
+    difficulty: "intermediate"
+    duration: 60
+    path: "01-cicd/codepipeline"
+    prerequisites:
+      - "AWS CLI configured"
+      - "CodeCommit repository access"
+      - "Basic CI/CD understanding"
+    estimated_cost: 5.00
+    aws_services:
+      - "CodePipeline"
+      - "CodeBuild"
+      - "CodeCommit"
+      - "S3"
+      - "IAM"
+
+  cicd-codebuild:
+    name: "Advanced CodeBuild Projects"
+    description: "Custom build environments, caching strategies, and parallel builds"
+    category: "cicd"
+    difficulty: "intermediate"
+    duration: 45
+    path: "01-cicd/codebuild"
+    prerequisites:
+      - "AWS CLI configured"
+      - "Docker basics"
+      - "Build process understanding"
+    estimated_cost: 3.00
+    aws_services:
+      - "CodeBuild"
+      - "ECR"
+      - "CloudWatch"
+      - "IAM"
+
+  cicd-codedeploy:
+    name: "CodeDeploy Deployment Strategies"
+    description: "Deployment strategies for EC2, ECS, and Lambda with rollback scenarios"
+    category: "cicd"
+    difficulty: "advanced"
+    duration: 75
+    path: "01-cicd/codedeploy"
+    prerequisites:
+      - "AWS CLI configured"
+      - "Target deployment environments"
+      - "Application deployment understanding"
+    estimated_cost: 8.00
+    aws_services:
+      - "CodeDeploy"
+      - "EC2"
+      - "ECS"
+      - "Lambda"
+      - "Auto Scaling"
+      - "Load Balancer"
+
+  iac-cloudformation:
+    name: "Advanced CloudFormation Patterns"
+    description: "Nested stacks, custom resources, and advanced CloudFormation features"
+    category: "iac"
+    difficulty: "advanced"
+    duration: 90
+    path: "02-iac/cloudformation"
+    prerequisites:
+      - "AWS CLI configured"
+      - "CloudFormation basics"
+      - "JSON/YAML understanding"
+    estimated_cost: 10.00
+    aws_services:
+      - "CloudFormation"
+      - "Lambda"
+      - "EC2"
+      - "VPC"
+      - "IAM"
+
+  iac-cdk:
+    name: "AWS CDK Infrastructure Projects"
+    description: "Infrastructure as code using AWS CDK with TypeScript and Python"
+    category: "iac"
+    difficulty: "intermediate"
+    duration: 60
+    path: "02-iac/cdk"
+    prerequisites:
+      - "Node.js installed"
+      - "TypeScript or Python knowledge"
+      - "AWS CDK CLI installed"
+    estimated_cost: 7.00
+    aws_services:
+      - "CloudFormation"
+      - "EC2"
+      - "VPC"
+      - "Lambda"
+      - "IAM"
+
+  iac-terraform:
+    name: "Terraform AWS Integration"
+    description: "Terraform modules and state management for AWS resources"
+    category: "iac"
+    difficulty: "intermediate"
+    duration: 75
+    path: "02-iac/terraform"
+    prerequisites:
+      - "Terraform installed"
+      - "HCL syntax understanding"
+      - "AWS provider knowledge"
+    estimated_cost: 8.00
+    aws_services:
+      - "EC2"
+      - "VPC"
+      - "S3"
+      - "IAM"
+
+  monitoring-cloudwatch:
+    name: "CloudWatch Comprehensive Monitoring"
+    description: "Custom metrics, dashboards, and automated alerting"
+    category: "monitoring"
+    difficulty: "intermediate"
+    duration: 50
+    path: "03-monitoring/cloudwatch"
+    prerequisites:
+      - "AWS CLI configured"
+      - "Applications to monitor"
+      - "Basic monitoring concepts"
+    estimated_cost: 4.00
+    aws_services:
+      - "CloudWatch"
+      - "SNS"
+      - "Lambda"
+      - "EC2"
+
+  monitoring-xray:
+    name: "X-Ray Distributed Tracing"
+    description: "Implement distributed tracing for microservices applications"
+    category: "monitoring"
+    difficulty: "advanced"
+    duration: 65
+    path: "03-monitoring/xray"
+    prerequisites:
+      - "Microservices understanding"
+      - "Application instrumentation knowledge"
+      - "Distributed systems concepts"
+    estimated_cost: 6.00
+    aws_services:
+      - "X-Ray"
+      - "Lambda"
+      - "ECS"
+      - "API Gateway"
+
+  monitoring-config:
+    name: "AWS Config Compliance Monitoring"
+    description: "Compliance rules, automated remediation, and governance"
+    category: "monitoring"
+    difficulty: "advanced"
+    duration: 70
+    path: "03-monitoring/config"
+    prerequisites:
+      - "AWS CLI configured"
+      - "Compliance requirements understanding"
+      - "Lambda basics"
+    estimated_cost: 5.00
+    aws_services:
+      - "Config"
+      - "Lambda"
+      - "SNS"
+      - "CloudWatch"
+      - "IAM"

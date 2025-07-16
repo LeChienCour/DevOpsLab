@@ -165,3 +165,81 @@ kubernetes/container_labs/**/docker-compose*
 
 #Ignore Kubernetes .yaml files
 kubernetes/kubernetes_lab/**/*.yaml
+
+# AWS DevOps Labs - Temporary and Generated Files
+# Lab session information files (contain sensitive data)
+**/lab-session-info.txt
+
+# Deployment packages and archives
+**/*-deployment.zip
+**/*-source.zip
+**/sample-app/
+**/updated-app/
+**/inplace-app/
+**/broken-app/
+**/multi-app/
+**/temp-repo/
+**/sample-projects/
+
+# AWS credentials and configuration
+**/.aws/
+**/aws-credentials.txt
+
+# SSH keys generated during labs
+**/*.pem
+**/*-keypair.pem
+
+# CloudFormation outputs and temporary files
+**/dashboard-*.json
+**/ecs-taskdef.json
+**/initial-code.zip
+
+# Build artifacts and cache
+**/node_modules/
+**/.npm/
+**/.yarn-cache/
+**/.m2/
+**/.gradle/
+**/target/
+**/dist/
+**/build/
+**/coverage/
+**/htmlcov/
+
+# Docker build context and images
+**/Dockerfile.tmp
+**/.dockerignore.tmp
+
+# Terraform state files (if used in future labs)
+**/*.tfstate
+**/*.tfstate.*
+**/.terraform/
+**/.terraform.lock.hcl
+
+# IDE and editor files
+**/.vscode/
+**/.idea/
+**/*.swp
+**/*.swo
+**/*~
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Log files
+**/*.log
+**/logs/
+
+# Backup files
+**/*.backup
+**/*.bak
+**/*.orig
+
+#Kiro specs
+.kiro

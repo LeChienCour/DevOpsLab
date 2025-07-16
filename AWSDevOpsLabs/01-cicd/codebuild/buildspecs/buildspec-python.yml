@@ -1,0 +1,173 @@
+version: 0.2
+
+# Python Build Environment Specification
+# This buildspec is optimized for Python applications with pip/poetry package management
+
+env:
+  variables:
+    PYTHONPATH: /tmp/python-path
+    PIP_CACHE_DIR: /tmp/.pip-cache
+    POETRY_CACHE_DIR: /tmp/.poetry-cache
+    PYTHON_ENV: production
+  parameter-store:
+    # Example: Retrieve database URL from Parameter Store
+    # DATABASE_URL: /myapp/database-url
+
+phases:
+  install:
+    runtime-versions:
+      python: 3.9
+    commands:
+      - echo "Setting up Python environment..."
+      - python --version
+      - pip --version
+      
+      # Upgrade pip and install build tools
+      - python -m pip install --upgrade pip setuptools wheel
+      
+      # Install Poetry if pyproject.toml exists
+      - |
+        if [ -f pyproject.toml ]; then
+          echo "Installing Poetry for dependency management"
+          pip install poetry
+          poetry config cache-dir $POETRY_CACHE_DIR
+        fi
+      
+      # Install development tools
+      - pip install pytest pytest-cov flake8 black mypy bandit safety
+
+  pre_build:
+    commands:
+      - echo "Running pre-build tasks..."
+      - echo "Build started on $(date)"
+      
+      # Install dependencies
+      - |
+        if [ -f pyproject.toml ]; then
+          echo "Installing dependencies with Poetry..."
+          poetry install --no-dev
+        elif [ -f requirements.txt ]; then
+          echo "Installing dependencies with pip..."
+          pip install -r requirements.txt --cache-dir $PIP_CACHE_DIR
+        fi
+      
+      # Install test dependencies
+      - |
+        if [ -f requirements-dev.txt ]; then
+          pip install -r requirements-dev.txt --cache-dir $PIP_CACHE_DIR
+        fi
+      
+      # Code formatting check
+      - echo "Checking code formatting with Black..."
+      - black --check . || true
+      
+      # Linting
+      - echo "Running Flake8 linting..."
+      - flake8 . --max-line-length=88 --extend-ignore=E203,W503 || true
+      
+      # Type checking
+      - echo "Running MyPy type checking..."
+      - mypy . || true
+
+  build:
+    commands:
+      - echo "Starting build phase..."
+      
+      # Run security checks
+      - echo "Running Bandit security analysis..."
+      - bandit -r . -f json -o bandit-report.json || true
+      
+      # Check for known security vulnerabilities
+      - echo "Checking for known vulnerabilities with Safety..."
+      - safety check --json --output safety-report.json || true
+      
+      # Run tests with coverage
+      - echo "Running tests with coverage..."
+      - |
+        if [ -f pyproject.toml ]; then
+          poetry run pytest --cov=. --cov-report=xml --cov-report=html --junitxml=test-results.xml
+        else
+          pytest --cov=. --cov-report=xml --cov-report=html --junitxml=test-results.xml
+        fi
+      
+      # Build package
+      - echo "Building Python package..."
+      - |
+        if [ -f pyproject.toml ]; then
+          poetry build
+        elif [ -f setup.py ]; then
+          python setup.py sdist bdist_wheel
+        fi
+      
+      # Generate build metadata
+      - echo "Generating build metadata..."
+      - |
+        cat > build-info.json << EOF
+        {
+          "buildTime": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+          "commitHash": "$CODEBUILD_RESOLVED_SOURCE_VERSION",
+          "buildId": "$CODEBUILD_BUILD_ID",
+          "pythonVersion": "$(python --version)",
+          "pipVersion": "$(pip --version)"
+        }
+        EOF
+
+  post_build:
+    commands:
+      - echo "Post-build phase started..."
+      
+      # Generate requirements.txt from Poetry (if applicable)
+      - |
+        if [ -f pyproject.toml ]; then
+          echo "Generating requirements.txt from Poetry..."
+          poetry export -f requirements.txt --output requirements-generated.txt
+        fi
+      
+      # Create deployment package
+      - echo "Creating deployment package..."
+      - mkdir -p deployment
+      - cp -r src/* deployment/ 2>/dev/null || cp -r *.py deployment/ 2>/dev/null || true
+      - cp requirements*.txt deployment/ 2>/dev/null || true
+      
+      - echo "Build completed on $(date)"
+
+# Cache configuration for faster builds
+cache:
+  paths:
+    - '/tmp/.pip-cache/**/*'
+    - '/tmp/.poetry-cache/**/*'
+    - '.venv/**/*'
+
+artifacts:
+  files:
+    - 'deployment/**/*'
+    - 'dist/**/*'
+  secondary-artifacts:
+    test-results:
+      files:
+        - 'test-results.xml'
+        - 'coverage.xml'
+        - 'htmlcov/**/*'
+      base-directory: '.'
+    security-reports:
+      files:
+        - 'bandit-report.json'
+        - 'safety-report.json'
+      base-directory: '.'
+    build-metadata:
+      files:
+        - 'build-info.json'
+        - 'requirements-generated.txt'
+      base-directory: '.'
+
+reports:
+  pytest-reports:
+    files:
+      - 'test-results.xml'
+    file-format: 'JUNITXML'
+    base-directory: '.'
+  coverage-reports:
+    files:
+      - 'coverage.xml'
+    file-format: 'COBERTURAXML'
+    base-directory: '.'

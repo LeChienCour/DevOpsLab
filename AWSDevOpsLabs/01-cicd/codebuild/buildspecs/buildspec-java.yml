@@ -1,0 +1,196 @@
+version: 0.2
+
+# Java Build Environment Specification
+# This buildspec is optimized for Java applications with Maven/Gradle build systems
+
+env:
+  variables:
+    JAVA_HOME: /usr/lib/jvm/java-11-openjdk-amd64
+    MAVEN_OPTS: -Xmx1024m
+    GRADLE_OPTS: -Xmx1024m -Dorg.gradle.daemon=false
+    MAVEN_CACHE_DIR: /tmp/.m2
+    GRADLE_CACHE_DIR: /tmp/.gradle
+  parameter-store:
+    # Example: Retrieve database credentials from Parameter Store
+    # DB_PASSWORD: /myapp/db-password
+
+phases:
+  install:
+    runtime-versions:
+      java: openjdk11
+    commands:
+      - echo "Setting up Java build environment..."
+      - java -version
+      - javac -version
+      
+      # Install Maven if pom.xml exists
+      - |
+        if [ -f pom.xml ]; then
+          echo "Maven project detected"
+          mvn --version
+        fi
+      
+      # Install Gradle if build.gradle exists
+      - |
+        if [ -f build.gradle ] || [ -f build.gradle.kts ]; then
+          echo "Gradle project detected"
+          ./gradlew --version || gradle --version
+        fi
+      
+      # Install additional tools
+      - echo "Installing additional build tools..."
+      - apt-get update && apt-get install -y findbugs
+
+  pre_build:
+    commands:
+      - echo "Running pre-build tasks..."
+      - echo "Build started on $(date)"
+      
+      # Download dependencies
+      - |
+        if [ -f pom.xml ]; then
+          echo "Downloading Maven dependencies..."
+          mvn dependency:go-offline -Dmaven.repo.local=$MAVEN_CACHE_DIR
+        elif [ -f build.gradle ] || [ -f build.gradle.kts ]; then
+          echo "Downloading Gradle dependencies..."
+          ./gradlew dependencies --gradle-user-home $GRADLE_CACHE_DIR || gradle dependencies --gradle-user-home $GRADLE_CACHE_DIR
+        fi
+      
+      # Code quality checks
+      - echo "Running code quality analysis..."
+      - |
+        if [ -f pom.xml ]; then
+          # Maven: Run Checkstyle and SpotBugs
+          mvn checkstyle:check -Dmaven.repo.local=$MAVEN_CACHE_DIR || true
+          mvn spotbugs:check -Dmaven.repo.local=$MAVEN_CACHE_DIR || true
+        elif [ -f build.gradle ] || [ -f build.gradle.kts ]; then
+          # Gradle: Run Checkstyle and SpotBugs
+          ./gradlew checkstyleMain --gradle-user-home $GRADLE_CACHE_DIR || true
+          ./gradlew spotbugsMain --gradle-user-home $GRADLE_CACHE_DIR || true
+        fi
+
+  build:
+    commands:
+      - echo "Starting build phase..."
+      
+      # Compile and run tests
+      - |
+        if [ -f pom.xml ]; then
+          echo "Building with Maven..."
+          mvn clean compile test -Dmaven.repo.local=$MAVEN_CACHE_DIR
+          
+          # Generate test reports
+          mvn surefire-report:report -Dmaven.repo.local=$MAVEN_CACHE_DIR
+          
+          # Package the application
+          mvn package -DskipTests -Dmaven.repo.local=$MAVEN_CACHE_DIR
+          
+        elif [ -f build.gradle ] || [ -f build.gradle.kts ]; then
+          echo "Building with Gradle..."
+          ./gradlew clean compileJava test --gradle-user-home $GRADLE_CACHE_DIR || gradle clean compileJava test --gradle-user-home $GRADLE_CACHE_DIR
+          
+          # Package the application
+          ./gradlew build -x test --gradle-user-home $GRADLE_CACHE_DIR || gradle build -x test --gradle-user-home $GRADLE_CACHE_DIR
+        fi
+      
+      # Generate JaCoCo coverage report
+      - echo "Generating code coverage report..."
+      - |
+        if [ -f pom.xml ]; then
+          mvn jacoco:report -Dmaven.repo.local=$MAVEN_CACHE_DIR || true
+        elif [ -f build.gradle ] || [ -f build.gradle.kts ]; then
+          ./gradlew jacocoTestReport --gradle-user-home $GRADLE_CACHE_DIR || true
+        fi
+      
+      # Security vulnerability scan
+      - echo "Running security vulnerability scan..."
+      - |
+        if [ -f pom.xml ]; then
+          mvn org.owasp:dependency-check-maven:check -Dmaven.repo.local=$MAVEN_CACHE_DIR || true
+        elif [ -f build.gradle ] || [ -f build.gradle.kts ]; then
+          ./gradlew dependencyCheckAnalyze --gradle-user-home $GRADLE_CACHE_DIR || true
+        fi
+      
+      # Generate build metadata
+      - echo "Generating build metadata..."
+      - |
+        cat > build-info.json << EOF
+        {
+          "buildTime": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+          "commitHash": "$CODEBUILD_RESOLVED_SOURCE_VERSION",
+          "buildId": "$CODEBUILD_BUILD_ID",
+          "javaVersion": "$(java -version 2>&1 | head -n 1)",
+          "buildTool": "$(if [ -f pom.xml ]; then echo 'maven'; elif [ -f build.gradle ] || [ -f build.gradle.kts ]; then echo 'gradle'; else echo 'unknown'; fi)"
+        }
+        EOF
+
+  post_build:
+    commands:
+      - echo "Post-build phase started..."
+      
+      # Create deployment artifacts
+      - echo "Preparing deployment artifacts..."
+      - mkdir -p deployment
+      - |
+        if [ -f pom.xml ]; then
+          cp target/*.jar deployment/ 2>/dev/null || true
+          cp target/*.war deployment/ 2>/dev/null || true
+        elif [ -f build.gradle ] || [ -f build.gradle.kts ]; then
+          cp build/libs/*.jar deployment/ 2>/dev/null || true
+          cp build/libs/*.war deployment/ 2>/dev/null || true
+        fi
+      
+      # Copy configuration files
+      - cp src/main/resources/application*.properties deployment/ 2>/dev/null || true
+      - cp src/main/resources/application*.yml deployment/ 2>/dev/null || true
+      
+      - echo "Build completed on $(date)"
+
+# Cache configuration for faster builds
+cache:
+  paths:
+    - '/tmp/.m2/**/*'
+    - '/tmp/.gradle/**/*'
+    - '.gradle/**/*'
+
+artifacts:
+  files:
+    - 'deployment/**/*'
+  secondary-artifacts:
+    test-results:
+      files:
+        - 'target/surefire-reports/**/*'
+        - 'build/test-results/**/*'
+        - 'target/site/jacoco/**/*'
+        - 'build/reports/jacoco/**/*'
+      base-directory: '.'
+    security-reports:
+      files:
+        - 'target/dependency-check-report.html'
+        - 'build/reports/dependency-check-report.html'
+      base-directory: '.'
+    quality-reports:
+      files:
+        - 'target/checkstyle-result.xml'
+        - 'target/spotbugsXml.xml'
+        - 'build/reports/checkstyle/**/*'
+        - 'build/reports/spotbugs/**/*'
+      base-directory: '.'
+    build-metadata:
+      files:
+        - 'build-info.json'
+      base-directory: '.'
+
+reports:
+  surefire-reports:
+    files:
+      - 'target/surefire-reports/TEST-*.xml'
+      - 'build/test-results/test/TEST-*.xml'
+    file-format: 'JUNITXML'
+    base-directory: '.'
+  jacoco-reports:
+    files:
+      - 'target/site/jacoco/jacoco.xml'
+      - 'build/reports/jacoco/test/jacocoTestReport.xml'
+    file-format: 'JACOCOXML'
+    base-directory: '.'
