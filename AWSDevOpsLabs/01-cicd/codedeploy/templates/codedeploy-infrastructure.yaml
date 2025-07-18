@@ -1,23 +1,11 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: 'CodeDeploy infrastructure with applications, deployment groups, and deployment strategies for EC2 and ECS'
+Description: 'CodeDeploy basic infrastructure with EC2 instances for in-place deployment'
 
 Parameters:
   ProjectName:
     Type: String
     Default: 'codedeploy-lab'
     Description: 'Name of the project for resource naming'
-  
-  VpcId:
-    Type: AWS::EC2::VPC::Id
-    Description: 'VPC ID where resources will be deployed'
-  
-  SubnetIds:
-    Type: List<AWS::EC2::Subnet::Id>
-    Description: 'List of subnet IDs for deployment targets'
-  
-  KeyPairName:
-    Type: AWS::EC2::KeyPair::KeyName
-    Description: 'EC2 Key Pair for instance access'
   
   ArtifactBucketName:
     Type: String
@@ -29,8 +17,6 @@ Resources:
     Type: AWS::S3::Bucket
     Properties:
       BucketName: !Ref ArtifactBucketName
-      VersioningConfiguration:
-        Status: Enabled
       BucketEncryption:
         ServerSideEncryptionConfiguration:
           - ServerSideEncryptionByDefault:
@@ -43,6 +29,8 @@ Resources:
       Tags:
         - Key: Project
           Value: !Ref ProjectName
+        - Key: Purpose
+          Value: 'Deployment Artifacts'
 
   # IAM Role for CodeDeploy Service
   CodeDeployServiceRole:
@@ -58,7 +46,6 @@ Resources:
             Action: sts:AssumeRole
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/service-role/AWSCodeDeployRole
-        - arn:aws:iam::aws:policy/service-role/AWSCodeDeployRoleForECS
       Tags:
         - Key: Project
           Value: !Ref ProjectName
@@ -77,8 +64,9 @@ Resources:
             Action: sts:AssumeRole
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
       Policies:
-        - PolicyName: CodeDeployEC2Policy
+        - PolicyName: S3ArtifactAccess
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
@@ -87,14 +75,8 @@ Resources:
                   - s3:GetObject
                   - s3:ListBucket
                 Resource:
-                  - !Sub '${ArtifactStore}/*'
+                  - !Sub '${ArtifactStore.Arn}/*'
                   - !GetAtt ArtifactStore.Arn
-              - Effect: Allow
-                Action:
-                  - logs:CreateLogGroup
-                  - logs:CreateLogStream
-                  - logs:PutLogEvents
-                Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codedeploy/*'
       Tags:
         - Key: Project
           Value: !Ref ProjectName
@@ -111,586 +93,193 @@ Resources:
     Type: AWS::EC2::SecurityGroup
     Properties:
       GroupName: !Sub '${ProjectName}-ec2-sg'
-      GroupDescription: 'Security group for CodeDeploy EC2 instances'
-      VpcId: !Ref VpcId
+      GroupDescription: 'Security group for CodeDeploy lab EC2 instances'
       SecurityGroupIngress:
         - IpProtocol: tcp
           FromPort: 80
           ToPort: 80
           CidrIp: 0.0.0.0/0
           Description: 'HTTP access'
-        - IpProtocol: tcp
-          FromPort: 443
-          ToPort: 443
-          CidrIp: 0.0.0.0/0
-          Description: 'HTTPS access'
         - IpProtocol: tcp
           FromPort: 22
           ToPort: 22
-          CidrIp: 10.0.0.0/8
-          Description: 'SSH access from VPC'
-      SecurityGroupEgress:
-        - IpProtocol: -1
           CidrIp: 0.0.0.0/0
-          Description: 'All outbound traffic'
+          Description: 'SSH access'
       Tags:
         - Key: Project
           Value: !Ref ProjectName
 
-  # Launch Template for EC2 Instances
-  EC2LaunchTemplate:
-    Type: AWS::EC2::LaunchTemplate
+  # EC2 Instance 1
+  EC2Instance1:
+    Type: AWS::EC2::Instance
     Properties:
-      LaunchTemplateName: !Sub '${ProjectName}-launch-template'
-      LaunchTemplateData:
-        ImageId: ami-0c02fb55956c7d316  # Amazon Linux 2 AMI (update as needed)
-        InstanceType: t3.micro
-        KeyName: !Ref KeyPairName
-        IamInstanceProfile:
-          Arn: !GetAtt EC2InstanceProfile.Arn
-        SecurityGroupIds:
-          - !Ref EC2SecurityGroup
-        UserData:
-          Fn::Base64: !Sub |
-            #!/bin/bash
-            yum update -y
-            yum install -y ruby wget httpd
-            
-            # Install CodeDeploy agent
-            cd /home/ec2-user
-            wget https://aws-codedeploy-${AWS::Region}.s3.${AWS::Region}.amazonaws.com/latest/install
-            chmod +x ./install
-            ./install auto
-            
-            # Start and enable httpd
-            systemctl start httpd
-            systemctl enable httpd
-            
-            # Create a simple index page
-            cat > /var/www/html/index.html << 'EOF'
-            <!DOCTYPE html>
-            <html>
-            <head>
-                <title>CodeDeploy Lab</title>
-                <style>
-                    body { font-family: Arial, sans-serif; margin: 40px; }
-                    .container { max-width: 800px; margin: 0 auto; }
-                    .status { padding: 20px; border-radius: 5px; margin: 20px 0; }
-                    .initial { background-color: #e3f2fd; border: 1px solid #2196f3; }
-                </style>
-            </head>
-            <body>
-                <div class="container">
-                    <h1>CodeDeploy Lab - Initial Version</h1>
-                    <div class="status initial">
-                        <h3>Status: Initial Deployment</h3>
-                        <p>This is the initial version deployed via UserData.</p>
-                        <p>Instance ID: <span id="instance-id">Loading...</span></p>
-                        <p>Deployment Time: <span id="deploy-time"></span></p>
-                    </div>
-                </div>
-                <script>
-                    // Get instance metadata
-                    fetch('http://169.254.169.254/latest/meta-data/instance-id')
-                        .then(response => response.text())
-                        .then(data => document.getElementById('instance-id').textContent = data)
-                        .catch(() => document.getElementById('instance-id').textContent = 'Unknown');
-                    
-                    document.getElementById('deploy-time').textContent = new Date().toLocaleString();
-                </script>
-            </body>
-            </html>
-            EOF
-            
-            # Install CloudWatch agent
-            wget https://s3.amazonaws.com/amazoncloudwatch-agent/amazon_linux/amd64/latest/amazon-cloudwatch-agent.rpm
-            rpm -U ./amazon-cloudwatch-agent.rpm
-        TagSpecifications:
-          - ResourceType: instance
-            Tags:
-              - Key: Name
-                Value: !Sub '${ProjectName}-instance'
-              - Key: Project
-                Value: !Ref ProjectName
-              - Key: Environment
-                Value: 'Lab'
-
-  # Auto Scaling Group for Blue-Green Deployments
-  AutoScalingGroup:
-    Type: AWS::AutoScaling::AutoScalingGroup
-    Properties:
-      AutoScalingGroupName: !Sub '${ProjectName}-asg'
-      LaunchTemplate:
-        LaunchTemplateId: !Ref EC2LaunchTemplate
-        Version: !GetAtt EC2LaunchTemplate.LatestVersionNumber
-      MinSize: 2
-      MaxSize: 6
-      DesiredCapacity: 2
-      VPCZoneIdentifier: !Ref SubnetIds
-      HealthCheckType: ELB
-      HealthCheckGracePeriod: 300
-      TargetGroupARNs:
-        - !Ref ApplicationLoadBalancerTargetGroup
+      ImageId: ami-0c02fb55956c7d316  # Amazon Linux 2 AMI (us-east-1)
+      InstanceType: t3.micro
+      IamInstanceProfile: !Ref EC2InstanceProfile
+      SecurityGroupIds:
+        - !Ref EC2SecurityGroup
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          yum update -y
+          yum install -y httpd
+          systemctl start httpd
+          systemctl enable httpd
+          
+          # Install CodeDeploy agent
+          yum install -y ruby wget
+          cd /home/ec2-user
+          wget https://aws-codedeploy-${AWS::Region}.s3.${AWS::Region}.amazonaws.com/latest/install
+          chmod +x ./install
+          ./install auto
+          service codedeploy-agent start
+          
+          # Create initial web content
+          cat > /var/www/html/index.html << 'EOF'
+          <!DOCTYPE html>
+          <html>
+          <head>
+              <title>CodeDeploy Lab - Initial Version</title>
+              <style>
+                  body { font-family: Arial, sans-serif; margin: 40px; background-color: #f0f0f0; }
+                  .container { max-width: 800px; margin: 0 auto; background: white; padding: 40px; border-radius: 10px; }
+                  .status { background: #e7f3ff; padding: 20px; border-radius: 5px; margin: 20px 0; }
+              </style>
+          </head>
+          <body>
+              <div class="container">
+                  <h1>🚀 CodeDeploy Lab Application</h1>
+                  <div class="status">
+                      <h2>Initial Deployment</h2>
+                      <p>This is the initial version deployed during infrastructure setup.</p>
+                      <p><strong>Instance:</strong> Instance 1</p>
+                      <p><strong>Version:</strong> 1.0.0</p>
+                  </div>
+              </div>
+          </body>
+          </html>
+          EOF
       Tags:
         - Key: Name
-          Value: !Sub '${ProjectName}-asg-instance'
-          PropagateAtLaunch: true
+          Value: !Sub '${ProjectName}-instance-1'
         - Key: Project
           Value: !Ref ProjectName
-          PropagateAtLaunch: true
         - Key: Environment
-          Value: 'Lab'
-          PropagateAtLaunch: true
-    UpdatePolicy:
-      AutoScalingRollingUpdate:
-        MinInstancesInService: 1
-        MaxBatchSize: 1
-        PauseTime: PT5M
-        WaitOnResourceSignals: false
+          Value: Lab
 
-  # Application Load Balancer
-  ApplicationLoadBalancer:
-    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+  # EC2 Instance 2
+  EC2Instance2:
+    Type: AWS::EC2::Instance
     Properties:
-      Name: !Sub '${ProjectName}-alb'
-      Type: application
-      Scheme: internet-facing
-      SecurityGroups:
-        - !Ref ALBSecurityGroup
-      Subnets: !Ref SubnetIds
+      ImageId: ami-0c02fb55956c7d316  # Amazon Linux 2 AMI (us-east-1)
+      InstanceType: t3.micro
+      IamInstanceProfile: !Ref EC2InstanceProfile
+      SecurityGroupIds:
+        - !Ref EC2SecurityGroup
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          yum update -y
+          yum install -y httpd
+          systemctl start httpd
+          systemctl enable httpd
+          
+          # Install CodeDeploy agent
+          yum install -y ruby wget
+          cd /home/ec2-user
+          wget https://aws-codedeploy-${AWS::Region}.s3.${AWS::Region}.amazonaws.com/latest/install
+          chmod +x ./install
+          ./install auto
+          service codedeploy-agent start
+          
+          # Create initial web content
+          cat > /var/www/html/index.html << 'EOF'
+          <!DOCTYPE html>
+          <html>
+          <head>
+              <title>CodeDeploy Lab - Initial Version</title>
+              <style>
+                  body { font-family: Arial, sans-serif; margin: 40px; background-color: #f0f0f0; }
+                  .container { max-width: 800px; margin: 0 auto; background: white; padding: 40px; border-radius: 10px; }
+                  .status { background: #e7f3ff; padding: 20px; border-radius: 5px; margin: 20px 0; }
+              </style>
+          </head>
+          <body>
+              <div class="container">
+                  <h1>🚀 CodeDeploy Lab Application</h1>
+                  <div class="status">
+                      <h2>Initial Deployment</h2>
+                      <p>This is the initial version deployed during infrastructure setup.</p>
+                      <p><strong>Instance:</strong> Instance 2</p>
+                      <p><strong>Version:</strong> 1.0.0</p>
+                  </div>
+              </div>
+          </body>
+          </html>
+          EOF
       Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-instance-2'
         - Key: Project
           Value: !Ref ProjectName
+        - Key: Environment
+          Value: Lab
 
-  # Security Group for ALB
-  ALBSecurityGroup:
-    Type: AWS::EC2::SecurityGroup
-    Properties:
-      GroupName: !Sub '${ProjectName}-alb-sg'
-      GroupDescription: 'Security group for Application Load Balancer'
-      VpcId: !Ref VpcId
-      SecurityGroupIngress:
-        - IpProtocol: tcp
-          FromPort: 80
-          ToPort: 80
-          CidrIp: 0.0.0.0/0
-          Description: 'HTTP access'
-        - IpProtocol: tcp
-          FromPort: 443
-          ToPort: 443
-          CidrIp: 0.0.0.0/0
-          Description: 'HTTPS access'
-      Tags:
-        - Key: Project
-          Value: !Ref ProjectName
-
-  # Target Group for ALB
-  ApplicationLoadBalancerTargetGroup:
-    Type: AWS::ElasticLoadBalancingV2::TargetGroup
-    Properties:
-      Name: !Sub '${ProjectName}-tg'
-      Port: 80
-      Protocol: HTTP
-      VpcId: !Ref VpcId
-      HealthCheckPath: /
-      HealthCheckProtocol: HTTP
-      HealthCheckIntervalSeconds: 30
-      HealthCheckTimeoutSeconds: 5
-      HealthyThresholdCount: 2
-      UnhealthyThresholdCount: 3
-      TargetType: instance
-      Tags:
-        - Key: Project
-          Value: !Ref ProjectName
-
-  # ALB Listener
-  ApplicationLoadBalancerListener:
-    Type: AWS::ElasticLoadBalancingV2::Listener
-    Properties:
-      DefaultActions:
-        - Type: forward
-          TargetGroupArn: !Ref ApplicationLoadBalancerTargetGroup
-      LoadBalancerArn: !Ref ApplicationLoadBalancer
-      Port: 80
-      Protocol: HTTP  #
- CodeDeploy Application for EC2
-  CodeDeployApplicationEC2:
+  # CodeDeploy Application
+  CodeDeployApplication:
     Type: AWS::CodeDeploy::Application
     Properties:
-      ApplicationName: !Sub '${ProjectName}-ec2-app'
+      ApplicationName: !Sub '${ProjectName}-app'
       ComputePlatform: Server
       Tags:
         - Key: Project
           Value: !Ref ProjectName
 
-  # Deployment Group for Blue-Green EC2 Deployment
-  DeploymentGroupBlueGreen:
+  # CodeDeploy Deployment Group
+  CodeDeployDeploymentGroup:
     Type: AWS::CodeDeploy::DeploymentGroup
     Properties:
-      ApplicationName: !Ref CodeDeployApplicationEC2
-      DeploymentGroupName: !Sub '${ProjectName}-blue-green-dg'
+      ApplicationName: !Ref CodeDeployApplication
+      DeploymentGroupName: !Sub '${ProjectName}-deployment-group'
       ServiceRoleArn: !GetAtt CodeDeployServiceRole.Arn
-      DeploymentConfigName: CodeDeployDefault.EC2AllAtOnceBlueGreen
-      BlueGreenDeploymentConfiguration:
-        TerminateBlueInstancesOnDeploymentSuccess:
-          Action: TERMINATE
-          TerminationWaitTimeInMinutes: 5
-        DeploymentReadyOption:
-          ActionOnTimeout: CONTINUE_DEPLOYMENT
-        GreenFleetProvisioningOption:
-          Action: COPY_AUTO_SCALING_GROUP
-      LoadBalancerInfo:
-        TargetGroupInfoList:
-          - Name: !GetAtt ApplicationLoadBalancerTargetGroup.TargetGroupName
-      AutoScalingGroups:
-        - !Ref AutoScalingGroup
-      AutoRollbackConfiguration:
-        Enabled: true
-        Events:
-          - DEPLOYMENT_FAILURE
-          - DEPLOYMENT_STOP_ON_ALARM
-          - DEPLOYMENT_STOP_ON_INSTANCE_FAILURE
-      AlarmConfiguration:
-        Enabled: true
-        Alarms:
-          - Name: !Ref DeploymentFailureAlarm
-      Tags:
-        - Key: Project
-          Value: !Ref ProjectName
-
-  # Deployment Group for In-Place EC2 Deployment
-  DeploymentGroupInPlace:
-    Type: AWS::CodeDeploy::DeploymentGroup
-    Properties:
-      ApplicationName: !Ref CodeDeployApplicationEC2
-      DeploymentGroupName: !Sub '${ProjectName}-in-place-dg'
-      ServiceRoleArn: !GetAtt CodeDeployServiceRole.Arn
-      DeploymentConfigName: CodeDeployDefault.EC2AllAtOneHalfAtATime
+      DeploymentConfigName: CodeDeployDefault.EC2AllAtOne
       Ec2TagFilters:
         - Type: KEY_AND_VALUE
           Key: Project
           Value: !Ref ProjectName
-        - Type: KEY_AND_VALUE
-          Key: Environment
-          Value: Lab
-      LoadBalancerInfo:
-        TargetGroupInfoList:
-          - Name: !GetAtt ApplicationLoadBalancerTargetGroup.TargetGroupName
       AutoRollbackConfiguration:
         Enabled: true
         Events:
           - DEPLOYMENT_FAILURE
           - DEPLOYMENT_STOP_ON_ALARM
-      AlarmConfiguration:
-        Enabled: true
-        Alarms:
-          - Name: !Ref DeploymentFailureAlarm
-      Tags:
-        - Key: Project
-          Value: !Ref ProjectName
-
-  # ECS Cluster for ECS Deployments
-  ECSCluster:
-    Type: AWS::ECS::Cluster
-    Properties:
-      ClusterName: !Sub '${ProjectName}-ecs-cluster'
-      CapacityProviders:
-        - FARGATE
-        - FARGATE_SPOT
-      DefaultCapacityProviderStrategy:
-        - CapacityProvider: FARGATE
-          Weight: 1
-        - CapacityProvider: FARGATE_SPOT
-          Weight: 4
-      ClusterSettings:
-        - Name: containerInsights
-          Value: enabled
-      Tags:
-        - Key: Project
-          Value: !Ref ProjectName
-
-  # ECS Task Definition
-  ECSTaskDefinition:
-    Type: AWS::ECS::TaskDefinition
-    Properties:
-      Family: !Sub '${ProjectName}-task'
-      NetworkMode: awsvpc
-      RequiresCompatibilities:
-        - FARGATE
-      Cpu: 256
-      Memory: 512
-      ExecutionRoleArn: !GetAtt ECSExecutionRole.Arn
-      TaskRoleArn: !GetAtt ECSTaskRole.Arn
-      ContainerDefinitions:
-        - Name: web-app
-          Image: nginx:latest
-          PortMappings:
-            - ContainerPort: 80
-              Protocol: tcp
-          LogConfiguration:
-            LogDriver: awslogs
-            Options:
-              awslogs-group: !Ref ECSLogGroup
-              awslogs-region: !Ref AWS::Region
-              awslogs-stream-prefix: ecs
-          Environment:
-            - Name: ENVIRONMENT
-              Value: lab
-      Tags:
-        - Key: Project
-          Value: !Ref ProjectName
-
-  # ECS Service
-  ECSService:
-    Type: AWS::ECS::Service
-    DependsOn: ApplicationLoadBalancerListener
-    Properties:
-      ServiceName: !Sub '${ProjectName}-ecs-service'
-      Cluster: !Ref ECSCluster
-      TaskDefinition: !Ref ECSTaskDefinition
-      DesiredCount: 2
-      LaunchType: FARGATE
-      NetworkConfiguration:
-        AwsvpcConfiguration:
-          SecurityGroups:
-            - !Ref ECSSecurityGroup
-          Subnets: !Ref SubnetIds
-          AssignPublicIp: ENABLED
-      LoadBalancers:
-        - ContainerName: web-app
-          ContainerPort: 80
-          TargetGroupArn: !Ref ECSTargetGroup
-      DeploymentConfiguration:
-        MaximumPercent: 200
-        MinimumHealthyPercent: 50
-        DeploymentCircuitBreaker:
-          Enable: true
-          Rollback: true
-      Tags:
-        - Key: Project
-          Value: !Ref ProjectName
-
-  # ECS Target Group
-  ECSTargetGroup:
-    Type: AWS::ElasticLoadBalancingV2::TargetGroup
-    Properties:
-      Name: !Sub '${ProjectName}-ecs-tg'
-      Port: 80
-      Protocol: HTTP
-      VpcId: !Ref VpcId
-      TargetType: ip
-      HealthCheckPath: /
-      HealthCheckProtocol: HTTP
-      HealthCheckIntervalSeconds: 30
-      HealthCheckTimeoutSeconds: 5
-      HealthyThresholdCount: 2
-      UnhealthyThresholdCount: 3
-      Tags:
-        - Key: Project
-          Value: !Ref ProjectName
-
-  # ECS ALB Listener Rule
-  ECSListenerRule:
-    Type: AWS::ElasticLoadBalancingV2::ListenerRule
-    Properties:
-      Actions:
-        - Type: forward
-          TargetGroupArn: !Ref ECSTargetGroup
-      Conditions:
-        - Field: path-pattern
-          Values:
-            - /ecs/*
-      ListenerArn: !Ref ApplicationLoadBalancerListener
-      Priority: 100
-
-  # Security Group for ECS Tasks
-  ECSSecurityGroup:
-    Type: AWS::EC2::SecurityGroup
-    Properties:
-      GroupName: !Sub '${ProjectName}-ecs-sg'
-      GroupDescription: 'Security group for ECS tasks'
-      VpcId: !Ref VpcId
-      SecurityGroupIngress:
-        - IpProtocol: tcp
-          FromPort: 80
-          ToPort: 80
-          SourceSecurityGroupId: !Ref ALBSecurityGroup
-          Description: 'HTTP from ALB'
-      Tags:
-        - Key: Project
-          Value: !Ref ProjectName
-
-  # IAM Role for ECS Task Execution
-  ECSExecutionRole:
-    Type: AWS::IAM::Role
-    Properties:
-      RoleName: !Sub '${ProjectName}-ecs-execution-role'
-      AssumeRolePolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service: ecs-tasks.amazonaws.com
-            Action: sts:AssumeRole
-      ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
-      Tags:
-        - Key: Project
-          Value: !Ref ProjectName
-
-  # IAM Role for ECS Tasks
-  ECSTaskRole:
-    Type: AWS::IAM::Role
-    Properties:
-      RoleName: !Sub '${ProjectName}-ecs-task-role'
-      AssumeRolePolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service: ecs-tasks.amazonaws.com
-            Action: sts:AssumeRole
-      Policies:
-        - PolicyName: ECSTaskPolicy
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-              - Effect: Allow
-                Action:
-                  - logs:CreateLogStream
-                  - logs:PutLogEvents
-                Resource: !Sub '${ECSLogGroup.Arn}:*'
-      Tags:
-        - Key: Project
-          Value: !Ref ProjectName
-
-  # CloudWatch Log Group for ECS
-  ECSLogGroup:
-    Type: AWS::Logs::LogGroup
-    Properties:
-      LogGroupName: !Sub '/ecs/${ProjectName}'
-      RetentionInDays: 14
-
-  # CodeDeploy Application for ECS
-  CodeDeployApplicationECS:
-    Type: AWS::CodeDeploy::Application
-    Properties:
-      ApplicationName: !Sub '${ProjectName}-ecs-app'
-      ComputePlatform: ECS
-      Tags:
-        - Key: Project
-          Value: !Ref ProjectName
-
-  # Deployment Group for ECS Blue-Green
-  ECSDeploymentGroup:
-    Type: AWS::CodeDeploy::DeploymentGroup
-    Properties:
-      ApplicationName: !Ref CodeDeployApplicationECS
-      DeploymentGroupName: !Sub '${ProjectName}-ecs-blue-green-dg'
-      ServiceRoleArn: !GetAtt CodeDeployServiceRole.Arn
-      DeploymentConfigName: CodeDeployDefault.ECSAllAtOnceBlueGreen
-      BlueGreenDeploymentConfiguration:
-        TerminateBlueTasksOnDeploymentSuccess:
-          Action: TERMINATE
-          TerminationWaitTimeInMinutes: 5
-        DeploymentReadyOption:
-          ActionOnTimeout: CONTINUE_DEPLOYMENT
-        GreenFleetProvisioningOption:
-          Action: COPY_AUTO_SCALING_GROUP
-      ECSServices:
-        - ServiceName: !GetAtt ECSService.Name
-          ClusterName: !Ref ECSCluster
-      LoadBalancerInfo:
-        TargetGroupInfoList:
-          - Name: !GetAtt ECSTargetGroup.TargetGroupName
-      AutoRollbackConfiguration:
-        Enabled: true
-        Events:
-          - DEPLOYMENT_FAILURE
-          - DEPLOYMENT_STOP_ON_ALARM
-      Tags:
-        - Key: Project
-          Value: !Ref ProjectName
-
-  # CloudWatch Alarms for Deployment Monitoring
-  DeploymentFailureAlarm:
-    Type: AWS::CloudWatch::Alarm
-    Properties:
-      AlarmName: !Sub '${ProjectName}-deployment-failure'
-      AlarmDescription: 'Alarm for deployment failures'
-      MetricName: ApplicationELB-TargetResponseTime
-      Namespace: AWS/ApplicationELB
-      Statistic: Average
-      Period: 60
-      EvaluationPeriods: 2
-      Threshold: 1
-      ComparisonOperator: GreaterThanThreshold
-      Dimensions:
-        - Name: LoadBalancer
-          Value: !GetAtt ApplicationLoadBalancer.LoadBalancerFullName
-      TreatMissingData: notBreaching
-
-  # SNS Topic for Deployment Notifications
-  DeploymentNotificationTopic:
-    Type: AWS::SNS::Topic
-    Properties:
-      TopicName: !Sub '${ProjectName}-deployment-notifications'
-      DisplayName: 'CodeDeploy Lab Notifications'
-      Tags:
-        - Key: Project
-          Value: !Ref ProjectName
 
 Outputs:
-  ApplicationLoadBalancerDNS:
-    Description: 'DNS name of the Application Load Balancer'
-    Value: !GetAtt ApplicationLoadBalancer.DNSName
+  EC2Application:
+    Description: 'CodeDeploy application name'
+    Value: !Ref CodeDeployApplication
     Export:
-      Name: !Sub '${AWS::StackName}-ALB-DNS'
-
-  CodeDeployApplicationEC2:
-    Description: 'CodeDeploy application name for EC2'
-    Value: !Ref CodeDeployApplicationEC2
+      Name: !Sub '${AWS::StackName}-EC2Application'
+  
+  DeploymentGroup:
+    Description: 'CodeDeploy deployment group name'
+    Value: !Ref CodeDeployDeploymentGroup
     Export:
-      Name: !Sub '${AWS::StackName}-EC2-App'
-
-  CodeDeployApplicationECS:
-    Description: 'CodeDeploy application name for ECS'
-    Value: !Ref CodeDeployApplicationECS
-    Export:
-      Name: !Sub '${AWS::StackName}-ECS-App'
-
-  BlueGreenDeploymentGroup:
-    Description: 'Blue-Green deployment group name'
-    Value: !Ref DeploymentGroupBlueGreen
-    Export:
-      Name: !Sub '${AWS::StackName}-BlueGreen-DG'
-
-  InPlaceDeploymentGroup:
-    Description: 'In-place deployment group name'
-    Value: !Ref DeploymentGroupInPlace
-    Export:
-      Name: !Sub '${AWS::StackName}-InPlace-DG'
-
-  ECSDeploymentGroup:
-    Description: 'ECS deployment group name'
-    Value: !Ref ECSDeploymentGroup
-    Export:
-      Name: !Sub '${AWS::StackName}-ECS-DG'
-
+      Name: !Sub '${AWS::StackName}-DeploymentGroup'
+  
   ArtifactBucket:
     Description: 'S3 bucket for deployment artifacts'
     Value: !Ref ArtifactStore
     Export:
       Name: !Sub '${AWS::StackName}-ArtifactBucket'
-
-  ECSCluster:
-    Description: 'ECS cluster name'
-    Value: !Ref ECSCluster
+  
+  Instance1IP:
+    Description: 'Public IP of EC2 Instance 1'
+    Value: !GetAtt EC2Instance1.PublicIp
     Export:
-      Name: !Sub '${AWS::StackName}-ECS-Cluster'
-
-  ECSService:
-    Description: 'ECS service name'
-    Value: !GetAtt ECSService.Name
+      Name: !Sub '${AWS::StackName}-Instance1IP'
+  
+  Instance2IP:
+    Description: 'Public IP of EC2 Instance 2'
+    Value: !GetAtt EC2Instance2.PublicIp
     Export:
-      Name: !Sub '${AWS::StackName}-ECS-Service'
+      Name: !Sub '${AWS::StackName}-Instance2IP'

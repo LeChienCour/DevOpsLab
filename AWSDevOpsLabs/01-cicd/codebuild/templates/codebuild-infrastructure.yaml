@@ -1,0 +1,158 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'CodeBuild single project infrastructure with S3 source, build, and artifact storage'
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: 'codebuild-lab'
+    Description: 'Name of the project for resource naming'
+  
+  SourceBucketName:
+    Type: String
+    Description: 'S3 bucket name for source code (must be globally unique)'
+  
+  ArtifactBucketName:
+    Type: String
+    Description: 'S3 bucket name for build artifacts (must be globally unique)'
+
+Resources:
+  # S3 Bucket for Source Code
+  SourceBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref SourceBucketName
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Purpose
+          Value: 'Source Code'
+
+  # S3 Bucket for Build Artifacts
+  ArtifactStore:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref ArtifactBucketName
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Purpose
+          Value: 'Build Artifacts'
+
+  # IAM Role for CodeBuild
+  CodeBuildServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-codebuild-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CodeBuildServicePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/*'
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                  - s3:PutObject
+                Resource:
+                  - !Sub '${SourceBucket.Arn}/*'
+                  - !GetAtt SourceBucket.Arn
+                  - !Sub '${ArtifactStore.Arn}/*'
+                  - !GetAtt ArtifactStore.Arn
+              - Effect: Allow
+                Action:
+                  - s3:ListBucket
+                Resource:
+                  - !GetAtt SourceBucket.Arn
+                  - !GetAtt ArtifactStore.Arn
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # CodeBuild Project for Node.js
+  CodeBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub '${ProjectName}-build'
+      Description: 'Node.js build project for the CodeBuild lab'
+      ServiceRole: !GetAtt CodeBuildServiceRole.Arn
+      Artifacts:
+        Type: S3
+        Location: !Sub '${ArtifactStore}/build-artifacts'
+        Packaging: ZIP
+      Cache:
+        Type: S3
+        Location: !Sub '${ArtifactStore}/build-cache'
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/amazonlinux2-x86_64-standard:3.0
+        EnvironmentVariables:
+          - Name: NODE_ENV
+            Value: production
+          - Name: NPM_CONFIG_CACHE
+            Value: /tmp/.npm
+      Source:
+        Type: S3
+        Location: !Sub '${SourceBucket}/nodejs-app-source.zip'
+        BuildSpec: 'buildspecs/buildspec-nodejs.yml'
+      TimeoutInMinutes: 15
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # CloudWatch Log Group
+  CodeBuildLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/codebuild/${ProjectName}-build'
+      RetentionInDays: 7
+
+Outputs:
+  BuildProject:
+    Description: 'CodeBuild project name'
+    Value: !Ref CodeBuildProject
+    Export:
+      Name: !Sub '${AWS::StackName}-BuildProject'
+  
+  SourceBucket:
+    Description: 'S3 bucket for source code'
+    Value: !Ref SourceBucket
+    Export:
+      Name: !Sub '${AWS::StackName}-SourceBucket'
+  
+  ArtifactBucket:
+    Description: 'S3 bucket for build artifacts'
+    Value: !Ref ArtifactStore
+    Export:
+      Name: !Sub '${AWS::StackName}-ArtifactBucket'

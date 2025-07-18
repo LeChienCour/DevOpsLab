@@ -1,62 +1,63 @@
 # CodeDeploy Lab Guide
 
 ## Objective
-Implement comprehensive deployment strategies using AWS CodeDeploy for EC2 and ECS targets, including blue-green deployments, in-place deployments, and automated rollback scenarios. This lab demonstrates advanced deployment patterns required for AWS DevOps Professional certification.
+Implement basic deployment automation using AWS CodeDeploy for EC2 instances with in-place deployment strategies. This lab demonstrates essential deployment automation techniques and integration with CI/CD pipelines as required for AWS DevOps Professional certification.
 
 ## Learning Outcomes
 By completing this lab, you will:
-- Master blue-green and in-place deployment strategies
-- Implement automated rollback scenarios and health checks
-- Configure deployment groups for different environments
-- Understand CodeDeploy integration with Auto Scaling Groups and Load Balancers
-- Practice ECS deployment strategies with traffic shifting
-- Monitor deployments and troubleshoot deployment failures
+- Understand CodeDeploy application and deployment group configuration
+- Master in-place deployment strategies for EC2 instances
+- Learn appspec.yml file structure and deployment hooks
+- Implement basic health checks and monitoring
+- Practice deployment troubleshooting and rollback procedures
+- Connect CodeDeploy with CodePipeline for complete CI/CD workflows
 
 ## Prerequisites
 - AWS CLI installed and configured with appropriate permissions
-- Basic understanding of EC2, ECS, and Load Balancers
-- Familiarity with Auto Scaling Groups
+- Basic understanding of EC2 instances
+- Familiarity with AWS CodeDeploy concepts
 - Text editor for configuration modifications
 
 ### Required AWS Permissions
 Your AWS user/role needs the following permissions:
 - CloudFormation: Full access for stack management
 - CodeDeploy: Full access for application and deployment management
-- EC2: Full access for instances, Auto Scaling Groups, and Load Balancers
-- ECS: Full access for cluster and service management
+- EC2: Full access for instances and security groups
 - IAM: Permission to create roles and policies
 - S3: Full access for artifact storage
 
 ## Architecture Overview
 
-This lab creates a comprehensive deployment environment:
+This lab creates a simple deployment environment using free tier resources:
 
 ```
 ┌─────────────────┐    ┌──────────────────┐    ┌─────────────────┐
-│   Application   │───▶│   CodeDeploy     │───▶│   Target        │
-│   Artifacts     │    │   Applications   │    │   Environments  │
+│   Application   │───▶│   CodeDeploy     │───▶│   EC2 Instances │
+│   Artifacts     │    │   Application    │    │   (2 x t3.micro)│
 │   (S3 Bucket)   │    │                  │    │                 │
 └─────────────────┘    └──────────────────┘    └─────────────────┘
                                 │                        │
                                 ▼                        ▼
                        ┌──────────────────┐    ┌─────────────────┐
-                       │  Deployment      │    │  Auto Scaling   │
-                       │  Groups          │    │  Groups + ALB   │
+                       │  Deployment      │    │  CodeDeploy     │
+                       │  Group           │    │  Agent          │
                        │                  │    │                 │
                        └──────────────────┘    └─────────────────┘
                                 │                        │
                                 ▼                        ▼
                        ┌──────────────────┐    ┌─────────────────┐
-                       │  Health Checks   │    │  ECS Cluster    │
-                       │  & Monitoring    │    │  & Services     │
+                       │  Health Checks   │    │  CloudWatch     │
+                       │  & Monitoring    │    │  Logs           │
                        └──────────────────┘    └─────────────────┘
 ```
 
-### Deployment Strategies Covered:
-- **Blue-Green EC2**: Zero-downtime deployments with automatic traffic switching
-- **In-Place EC2**: Rolling updates with health checks
-- **ECS Blue-Green**: Container deployments with traffic shifting
-- **Automated Rollback**: Failure detection and automatic rollback
+### Resources Created:
+- **CodeDeploy Application**: Single EC2 application
+- **Deployment Group**: In-place deployment configuration
+- **EC2 Instances**: 2 t3.micro instances (free tier eligible)
+- **S3 Bucket**: Deployment artifact storage
+- **IAM Roles**: Service roles for CodeDeploy and EC2
+- **Security Group**: Basic web access configuration
 
 ## Lab Steps
 
@@ -69,8 +70,8 @@ This lab creates a comprehensive deployment environment:
 
 2. **Review the infrastructure template:**
    - Open `templates/codedeploy-infrastructure.yaml`
-   - Examine the Auto Scaling Groups, Load Balancer, and ECS cluster
-   - Note the different deployment groups and their configurations
+   - Examine the EC2 instances and deployment group configuration
+   - Note the basic deployment strategy and IAM roles
 
 3. **Review the deployment configurations:**
    ```bash
@@ -89,56 +90,56 @@ This lab creates a comprehensive deployment environment:
    ```
 
 5. **Monitor the deployment:**
-   - The script creates a complete deployment environment
-   - CloudFormation stack creation takes 10-15 minutes
-   - Auto Scaling Group instances need additional time to initialize
+   - The script creates 2 t3.micro EC2 instances (free tier eligible)
+   - CloudFormation stack creation takes 5-8 minutes
+   - EC2 instances need additional time to initialize and install CodeDeploy agent
 
-6. **Verify the initial deployment:**
-   - Use the Load Balancer URL from the output
-   - Confirm the application is accessible
-   - Note the initial deployment information
+6. **Verify the initial setup:**
+   - Check the EC2 instances are running in the AWS Console
+   - Confirm the CodeDeploy application and deployment group are created
+   - Note the instance IPs for testing
 
 ### Step 2: Understand the Deployment Environment
 
 1. **Explore the created resources:**
-   - Go to AWS Console → EC2 → Auto Scaling Groups
-   - Find your Auto Scaling Group and examine the instances
-   - Go to EC2 → Load Balancers and check the target group health
+   - Go to AWS Console → EC2 → Instances
+   - Find your 2 EC2 instances and check their status
+   - Note the instance IDs and public IP addresses
 
 2. **Review CodeDeploy applications:**
    - Go to AWS Console → CodeDeploy → Applications
-   - Examine the EC2 and ECS applications
-   - Review the deployment groups and their configurations
+   - Examine the EC2 application
+   - Review the deployment group configuration
 
 3. **Check the sample application:**
    ```bash
-   # Get the Load Balancer URL from the session info
-   ALB_URL=$(grep "Load Balancer URL:" lab-session-info.txt | cut -d' ' -f4)
-   echo "Application URL: $ALB_URL"
+   # Get the instance IPs from the session info
+   INSTANCE_IP=$(grep "Instance IP:" lab-session-info.txt | head -1 | cut -d' ' -f3)
+   echo "Application URL: http://$INSTANCE_IP"
    
    # Test the application
-   curl -s "$ALB_URL" | grep -o '<title>.*</title>'
+   curl -s "http://$INSTANCE_IP" | grep -o '<title>.*</title>'
    ```
 
-### Step 3: Perform Blue-Green Deployment
+### Step 3: Perform Your First Deployment
 
-1. **Prepare a new version of the application:**
+1. **Create an updated version of the application:**
    ```bash
    # Create an updated version
    mkdir -p updated-app/{scripts,css,js}
    
-   # Copy the original deployment scripts
+   # Copy deployment scripts
    cp -r deployment-configs/scripts updated-app/
    cp deployment-configs/appspec-ec2.yml updated-app/appspec.yml
    
-   # Create updated HTML with version 3.0.0
+   # Create updated HTML
    cat > updated-app/index.html << 'EOF'
    <!DOCTYPE html>
    <html lang="en">
    <head>
        <meta charset="UTF-8">
        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-       <title>CodeDeploy Lab Application - Updated</title>
+       <title>CodeDeploy Lab - Updated Version</title>
        <style>
            body { 
                font-family: Arial, sans-serif; 
@@ -152,7 +153,6 @@ This lab creates a comprehensive deployment environment:
                background: rgba(255,255,255,0.1);
                padding: 40px;
                border-radius: 15px;
-               backdrop-filter: blur(10px);
            }
            .status { 
                background: rgba(255,255,255,0.2); 
@@ -171,154 +171,11 @@ This lab creates a comprehensive deployment environment:
        <div class="container">
            <h1>🚀 CodeDeploy Lab Application</h1>
            <div class="status">
-               <h2>✅ Blue-Green Deployment Successful!</h2>
-               <p class="version">Version 3.0.0</p>
-               <p>This is the updated version deployed via Blue-Green strategy.</p>
+               <h2>✅ Deployment Successful!</h2>
+               <p class="version">Version 2.0.0</p>
+               <p>This is the updated version deployed via CodeDeploy.</p>
                <p><strong>Deployment Time:</strong> <span id="deploy-time"></span></p>
                <p><strong>Instance ID:</strong> <span id="instance-id"></span></p>
-               <p><strong>Strategy:</strong> Blue-Green Deployment</p>
-           </div>
-           <div style="margin-top: 30px;">
-               <h3>🎯 New Features in v3.0.0:</h3>
-               <ul>
-                   <li>Enhanced UI with gradient background</li>
-                   <li>Improved deployment information display</li>
-                   <li>Better visual indicators for deployment success</li>
-                   <li>Optimized performance and loading times</li>
-               </ul>
-           </div>
-       </div>
-       <script>
-           // Load instance metadata
-           fetch('http://169.254.169.254/latest/meta-data/instance-id')
-               .then(response => response.text())
-               .then(data => document.getElementById('instance-id').textContent = data)
-               .catch(() => document.getElementById('instance-id').textContent = 'Unknown');
-           
-           document.getElementById('deploy-time').textContent = new Date().toLocaleString();
-       </script>
-   </body>
-   </html>
-   EOF
-   
-   # Create the deployment package
-   cd updated-app && zip -r ../updated-app-deployment.zip . && cd ..
-   ```
-
-2. **Upload the new version:**
-   ```bash
-   # Get the artifact bucket name
-   ARTIFACT_BUCKET=$(grep "Artifact Bucket:" lab-session-info.txt | cut -d' ' -f3)
-   
-   # Upload the updated application
-   aws s3 cp updated-app-deployment.zip "s3://$ARTIFACT_BUCKET/"
-   ```
-
-3. **Start the blue-green deployment:**
-   ```bash
-   # Get deployment information
-   EC2_APP=$(grep "EC2 Application:" lab-session-info.txt | cut -d' ' -f3)
-   BLUE_GREEN_DG=$(grep "Blue-Green Deployment Group:" lab-session-info.txt | cut -d' ' -f4)
-   
-   # Create the deployment
-   DEPLOYMENT_ID=$(aws deploy create-deployment \
-     --application-name "$EC2_APP" \
-     --deployment-group-name "$BLUE_GREEN_DG" \
-     --s3-location bucket="$ARTIFACT_BUCKET",key=updated-app-deployment.zip,bundleType=zip \
-     --query 'deploymentId' \
-     --output text)
-   
-   echo "Blue-Green Deployment started: $DEPLOYMENT_ID"
-   ```
-
-4. **Monitor the blue-green deployment:**
-   ```bash
-   # Watch deployment status
-   watch -n 10 "aws deploy get-deployment --deployment-id $DEPLOYMENT_ID --query 'deploymentInfo.status' --output text"
-   
-   # Or check in AWS Console → CodeDeploy → Deployments
-   ```
-
-5. **Observe the blue-green process:**
-   - Go to AWS Console → EC2 → Auto Scaling Groups
-   - Watch as new instances (Green fleet) are created
-   - Monitor the Load Balancer target groups
-   - Observe traffic switching from Blue to Green fleet
-
-### Step 4: Test In-Place Deployment
-
-1. **Create another version for in-place deployment:**
-   ```bash
-   # Create version 4.0.0 for in-place deployment
-   mkdir -p inplace-app/{scripts,css,js}
-   
-   # Copy deployment scripts
-   cp -r deployment-configs/scripts inplace-app/
-   cp deployment-configs/appspec-ec2.yml inplace-app/appspec.yml
-   
-   # Create in-place version
-   cat > inplace-app/index.html << 'EOF'
-   <!DOCTYPE html>
-   <html lang="en">
-   <head>
-       <meta charset="UTF-8">
-       <meta name="viewport" content="width=device-width, initial-scale=1.0">
-       <title>CodeDeploy Lab - In-Place Update</title>
-       <style>
-           body { 
-               font-family: Arial, sans-serif; 
-               margin: 40px; 
-               background: linear-gradient(135deg, #6f42c1 0%, #e83e8c 100%);
-               color: white;
-           }
-           .container { 
-               max-width: 800px; 
-               margin: 0 auto; 
-               background: rgba(255,255,255,0.1);
-               padding: 40px;
-               border-radius: 15px;
-               backdrop-filter: blur(10px);
-           }
-           .status { 
-               background: rgba(255,255,255,0.2); 
-               padding: 20px; 
-               border-radius: 10px; 
-               margin: 20px 0; 
-           }
-           .version { 
-               font-size: 2rem; 
-               font-weight: bold; 
-               color: #ffd700; 
-           }
-           .rolling { 
-               animation: pulse 2s infinite; 
-           }
-           @keyframes pulse {
-               0% { opacity: 1; }
-               50% { opacity: 0.7; }
-               100% { opacity: 1; }
-           }
-       </style>
-   </head>
-   <body>
-       <div class="container">
-           <h1 class="rolling">🔄 CodeDeploy Lab Application</h1>
-           <div class="status">
-               <h2>✅ In-Place Deployment Successful!</h2>
-               <p class="version">Version 4.0.0</p>
-               <p>This version was deployed using In-Place (Rolling) strategy.</p>
-               <p><strong>Deployment Time:</strong> <span id="deploy-time"></span></p>
-               <p><strong>Instance ID:</strong> <span id="instance-id"></span></p>
-               <p><strong>Strategy:</strong> In-Place Rolling Deployment</p>
-           </div>
-           <div style="margin-top: 30px;">
-               <h3>🎯 In-Place Deployment Features:</h3>
-               <ul>
-                   <li>Rolling updates across existing instances</li>
-                   <li>Maintains minimum healthy capacity</li>
-                   <li>Faster deployment (no new instances)</li>
-                   <li>Cost-effective for development environments</li>
-               </ul>
            </div>
        </div>
        <script>
@@ -334,38 +191,40 @@ This lab creates a comprehensive deployment environment:
    EOF
    
    # Create deployment package
-   cd inplace-app && zip -r ../inplace-app-deployment.zip . && cd ..
+   cd updated-app && zip -r ../updated-app-deployment.zip . && cd ..
    ```
 
-2. **Upload and deploy the in-place version:**
+2. **Upload and deploy the updated version:**
    ```bash
+   # Get deployment information
+   ARTIFACT_BUCKET=$(grep "Artifact Bucket:" lab-session-info.txt | cut -d' ' -f3)
+   EC2_APP=$(grep "EC2 Application:" lab-session-info.txt | cut -d' ' -f3)
+   DEPLOYMENT_GROUP=$(grep "Deployment Group:" lab-session-info.txt | cut -d' ' -f3)
+   
    # Upload to S3
-   aws s3 cp inplace-app-deployment.zip "s3://$ARTIFACT_BUCKET/"
+   aws s3 cp updated-app-deployment.zip "s3://$ARTIFACT_BUCKET/"
    
-   # Get in-place deployment group
-   IN_PLACE_DG=$(grep "In-Place Deployment Group:" lab-session-info.txt | cut -d' ' -f4)
-   
-   # Start in-place deployment
-   INPLACE_DEPLOYMENT_ID=$(aws deploy create-deployment \
+   # Start deployment
+   DEPLOYMENT_ID=$(aws deploy create-deployment \
      --application-name "$EC2_APP" \
-     --deployment-group-name "$IN_PLACE_DG" \
-     --s3-location bucket="$ARTIFACT_BUCKET",key=inplace-app-deployment.zip,bundleType=zip \
+     --deployment-group-name "$DEPLOYMENT_GROUP" \
+     --s3-location bucket="$ARTIFACT_BUCKET",key=updated-app-deployment.zip,bundleType=zip \
      --query 'deploymentId' \
      --output text)
    
-   echo "In-Place Deployment started: $INPLACE_DEPLOYMENT_ID"
+   echo "Deployment started: $DEPLOYMENT_ID"
    ```
 
-3. **Monitor the in-place deployment:**
+3. **Monitor the deployment:**
    ```bash
    # Watch deployment progress
-   aws deploy get-deployment --deployment-id "$INPLACE_DEPLOYMENT_ID"
+   aws deploy get-deployment --deployment-id "$DEPLOYMENT_ID"
    
    # Monitor in AWS Console
-   echo "Monitor at: https://console.aws.amazon.com/codesuite/codedeploy/deployments/$INPLACE_DEPLOYMENT_ID"
+   echo "Monitor at: https://console.aws.amazon.com/codesuite/codedeploy/deployments/$DEPLOYMENT_ID"
    ```
 
-### Step 5: Test Rollback Scenarios
+### Step 4: Test Rollback Scenarios
 
 1. **Create a deployment that will fail:**
    ```bash
@@ -405,7 +264,7 @@ This lab creates a comprehensive deployment environment:
    # Deploy with auto-rollback enabled
    BROKEN_DEPLOYMENT_ID=$(aws deploy create-deployment \
      --application-name "$EC2_APP" \
-     --deployment-group-name "$BLUE_GREEN_DG" \
+     --deployment-group-name "$DEPLOYMENT_GROUP" \
      --s3-location bucket="$ARTIFACT_BUCKET",key=broken-app-deployment.zip,bundleType=zip \
      --auto-rollback-configuration enabled=true,events=DEPLOYMENT_FAILURE,DEPLOYMENT_STOP_ON_ALARM \
      --query 'deploymentId' \
@@ -420,49 +279,9 @@ This lab creates a comprehensive deployment environment:
    watch -n 15 "aws deploy get-deployment --deployment-id $BROKEN_DEPLOYMENT_ID --query 'deploymentInfo.[status,errorInformation.message]' --output table"
    ```
 
-### Step 6: Advanced Deployment Monitoring
+### Step 5: Monitor and Troubleshoot Deployments
 
-1. **Set up CloudWatch monitoring:**
-   ```bash
-   # Create custom metric filter for deployment logs
-   aws logs put-metric-filter \
-     --log-group-name "/aws/codedeploy/agent" \
-     --filter-name "DeploymentErrors" \
-     --filter-pattern "ERROR" \
-     --metric-transformations \
-       metricName=DeploymentErrors,metricNamespace=CodeDeploy,metricValue=1
-   ```
-
-2. **Create deployment dashboard:**
-   ```bash
-   # Create CloudWatch dashboard
-   cat > dashboard-config.json << 'EOF'
-   {
-     "widgets": [
-       {
-         "type": "metric",
-         "properties": {
-           "metrics": [
-             ["AWS/CodeDeploy", "Deployments", "ApplicationName", "REPLACE_APP_NAME"]
-           ],
-           "period": 300,
-           "stat": "Sum",
-           "region": "us-east-1",
-           "title": "CodeDeploy Deployments"
-         }
-       }
-     ]
-   }
-   EOF
-   
-   # Replace placeholder and create dashboard
-   sed "s/REPLACE_APP_NAME/$EC2_APP/g" dashboard-config.json > dashboard-final.json
-   aws cloudwatch put-dashboard \
-     --dashboard-name "CodeDeploy-Lab-Dashboard" \
-     --dashboard-body file://dashboard-final.json
-   ```
-
-3. **Monitor deployment metrics:**
+1. **Analyze deployment performance:**
    ```bash
    # Get deployment statistics
    aws deploy list-deployments \
@@ -472,54 +291,41 @@ This lab creates a comprehensive deployment environment:
    
    # Get detailed deployment info
    aws deploy batch-get-deployments \
-     --deployment-ids "$DEPLOYMENT_ID" "$INPLACE_DEPLOYMENT_ID" \
+     --deployment-ids "$DEPLOYMENT_ID" \
      --query 'deploymentsInfo[*].[deploymentId,status,startTime,completeTime]' \
      --output table
    ```
 
-### Step 7: ECS Deployment (Advanced)
-
-1. **Test ECS blue-green deployment:**
+2. **Review deployment logs:**
    ```bash
-   # Get ECS application info
-   ECS_APP=$(grep "ECS Application:" lab-session-info.txt | cut -d' ' -f3)
-   ECS_DG=$(grep "ECS Deployment Group:" lab-session-info.txt | cut -d' ' -f4)
+   # Get deployment events
+   aws deploy list-deployment-instances \
+     --deployment-id "$DEPLOYMENT_ID"
    
-   # Create ECS task definition update
-   cat > ecs-taskdef.json << 'EOF'
-   {
-     "family": "codedeploy-lab-task",
-     "networkMode": "awsvpc",
-     "requiresCompatibilities": ["FARGATE"],
-     "cpu": "256",
-     "memory": "512",
-     "executionRoleArn": "REPLACE_EXECUTION_ROLE",
-     "taskRoleArn": "REPLACE_TASK_ROLE",
-     "containerDefinitions": [
-       {
-         "name": "web-app",
-         "image": "nginx:alpine",
-         "portMappings": [
-           {
-             "containerPort": 80,
-             "protocol": "tcp"
-           }
-         ],
-         "logConfiguration": {
-           "logDriver": "awslogs",
-           "options": {
-             "awslogs-group": "/ecs/codedeploy-lab",
-             "awslogs-region": "us-east-1",
-             "awslogs-stream-prefix": "ecs"
-           }
-         }
-       }
-     ]
-   }
-   EOF
+   # Check instance deployment status
+   INSTANCE_ID=$(aws ec2 describe-instances \
+     --filters "Name=tag:Project,Values=codedeploy-lab" \
+     --query 'Reservations[0].Instances[0].InstanceId' \
+     --output text)
    
-   echo "ECS deployment configuration created"
-   echo "Note: ECS deployments require additional setup and are demonstrated in the console"
+   aws deploy get-deployment-instance \
+     --deployment-id "$DEPLOYMENT_ID" \
+     --instance-id "$INSTANCE_ID"
+   ```
+
+3. **Set up basic monitoring:**
+   ```bash
+   # Create alarm for deployment failures
+   aws cloudwatch put-metric-alarm \
+     --alarm-name "CodeDeploy-Lab-Failures" \
+     --alarm-description "Alert on CodeDeploy failures" \
+     --metric-name "FailedDeployments" \
+     --namespace "AWS/CodeDeploy" \
+     --statistic "Sum" \
+     --period 300 \
+     --threshold 1 \
+     --comparison-operator "GreaterThanOrEqualToThreshold" \
+     --evaluation-periods 1
    ```
 
 ## Troubleshooting Guide
@@ -575,26 +381,18 @@ aws logs get-log-events \
 This lab creates the following AWS resources:
 
 ### Core Deployment Resources
-- **CodeDeploy Applications**: EC2 and ECS applications
-- **Deployment Groups**: Blue-green and in-place deployment configurations
-- **Auto Scaling Group**: EC2 instances for deployment targets
-- **Application Load Balancer**: Traffic distribution and health checks
-
-### Supporting Infrastructure
-- **ECS Cluster**: Container deployment environment
-- **ECS Service**: Container service with deployment configuration
+- **CodeDeploy Application**: Single EC2 application
+- **Deployment Group**: In-place deployment configuration
+- **EC2 Instances**: 2 t3.micro instances (free tier eligible)
 - **S3 Bucket**: Deployment artifact storage
-- **IAM Roles**: Service roles for CodeDeploy, EC2, and ECS
-- **Security Groups**: Network access control
-- **CloudWatch Alarms**: Deployment monitoring and rollback triggers
+- **IAM Roles**: Service roles for CodeDeploy and EC2
+- **Security Group**: Basic web access configuration
 
-### Estimated Costs
-- EC2 Instances: $0.0116/hour per t3.micro instance (2-6 instances)
-- Application Load Balancer: $0.0225/hour + $0.008/LCU-hour
-- ECS Fargate: $0.04048/vCPU/hour + $0.004445/GB/hour
-- S3 Storage: $0.023/GB/month
-- CloudWatch: $0.50/GB ingested
-- **Total estimated cost**: $15-30/day for active lab use
+### Estimated Costs (Free Tier Eligible)
+- EC2 Instances: 750 hours/month free per t3.micro, then $0.0116/hour
+- S3 Storage: 5GB free, then $0.023/GB/month
+- CloudWatch Logs: 5GB free, then $0.50/GB ingested
+- **Total estimated cost**: $0-10/month for regular use (mostly free tier)
 
 ## Cleanup
 
@@ -610,16 +408,15 @@ When you're finished with the lab:
    ```
 
 2. **Verify cleanup:**
-   - Check AWS Console for remaining resources
-   - Confirm Auto Scaling Groups are deleted
-   - Verify Load Balancers are removed
-   - Check ECS cluster is deleted
+   - Check AWS Console to ensure all resources are removed
+   - Confirm EC2 instances are terminated
+   - Verify S3 buckets are deleted
+   - Check CloudFormation stack is deleted
 
 3. **Clean up local files:**
    ```bash
-   rm -rf updated-app inplace-app broken-app
+   rm -rf updated-app broken-app
    rm -f *-deployment.zip
-   rm -f dashboard-*.json ecs-taskdef.json
    ```
 
 ## Next Steps

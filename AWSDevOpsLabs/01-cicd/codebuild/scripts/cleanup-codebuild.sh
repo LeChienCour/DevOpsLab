@@ -1,16 +1,14 @@
 #!/bin/bash
 
-# Advanced CodeBuild Lab Cleanup Script
+# CodeBuild Lab Cleanup Script
 # This script removes all resources created by the CodeBuild lab
 
-set -e
-
 # Configuration
-PROJECT_NAME="advanced-codebuild-lab"
+PROJECT_NAME="codebuild-lab"
 STACK_NAME="${PROJECT_NAME}-stack"
 REGION=${AWS_DEFAULT_REGION:-us-east-1}
 
-echo "=== Advanced CodeBuild Lab Cleanup ==="
+echo "=== CodeBuild Lab Cleanup ==="
 echo "Stack Name: $STACK_NAME"
 echo "Region: $REGION"
 echo
@@ -30,33 +28,52 @@ fi
 
 echo "Found stack: $STACK_NAME"
 
-# Get bucket names and ECR repository from stack outputs before deletion
-echo "Retrieving resource information..."
-ARTIFACT_BUCKET=$(aws cloudformation describe-stacks \
-    --stack-name "$STACK_NAME" \
-    --query 'Stacks[0].Outputs[?OutputKey==`ArtifactBucket`].OutputValue' \
-    --output text \
-    --region "$REGION" 2>/dev/null || echo "")
-
-CACHE_BUCKET=$(aws cloudformation describe-stacks \
-    --stack-name "$STACK_NAME" \
-    --query 'Stacks[0].Outputs[?OutputKey==`CacheBucket`].OutputValue' \
-    --output text \
-    --region "$REGION" 2>/dev/null || echo "")
-
-ECR_REPO_URI=$(aws cloudformation describe-stacks \
-    --stack-name "$STACK_NAME" \
-    --query 'Stacks[0].Outputs[?OutputKey==`ECRRepository`].OutputValue' \
-    --output text \
-    --region "$REGION" 2>/dev/null || echo "")
-
-# Extract ECR repository name from URI
-ECR_REPO_NAME=""
-if [ ! -z "$ECR_REPO_URI" ]; then
-    ECR_REPO_NAME=$(echo "$ECR_REPO_URI" | cut -d'/' -f2)
-fi
+# Function to safely empty an S3 bucket
+empty_s3_bucket() {
+    local bucket_name=$1
+    echo "Processing bucket: $bucket_name"
+    
+    # Check if bucket exists
+    if ! aws s3api head-bucket --bucket "$bucket_name" --region "$REGION" 2>/dev/null; then
+        echo "  Bucket $bucket_name not found or already deleted"
+        return 0
+    fi
+    
+    # Remove bucket policy first to avoid permission issues
+    echo "  Removing bucket policy..."
+    aws s3api delete-bucket-policy --bucket "$bucket_name" --region "$REGION" 2>/dev/null || true
+    
+    # Remove public access block to allow deletion
+    echo "  Removing public access block..."
+    aws s3api delete-public-access-block --bucket "$bucket_name" --region "$REGION" 2>/dev/null || true
+    
+    # Simple object deletion for non-versioned buckets
+    echo "  Removing all objects..."
+    aws s3 rm "s3://$bucket_name" --recursive --region "$REGION" 2>/dev/null || true
+    
+    # Clean up any incomplete multipart uploads
+    echo "  Cleaning up incomplete multipart uploads..."
+    aws s3api list-multipart-uploads \
+        --bucket "$bucket_name" \
+        --region "$REGION" \
+        --query 'Uploads[].[Key,UploadId]' \
+        --output text 2>/dev/null | \
+    while IFS=$'\t' read -r key upload_id; do
+        if [ ! -z "$key" ] && [ ! -z "$upload_id" ]; then
+            echo "    Aborting multipart upload: $key ($upload_id)"
+            aws s3api abort-multipart-upload \
+                --bucket "$bucket_name" \
+                --key "$key" \
+                --upload-id "$upload_id" \
+                --region "$REGION" 2>/dev/null || true
+        fi
+    done
+    
+    echo "  Bucket $bucket_name emptied successfully"
+}
 
 # Get all S3 buckets created by the stack
+echo "Retrieving bucket information..."
 BUCKETS=$(aws cloudformation describe-stack-resources \
     --stack-name "$STACK_NAME" \
     --query 'StackResources[?ResourceType==`AWS::S3::Bucket`].PhysicalResourceId' \
@@ -67,98 +84,12 @@ BUCKETS=$(aws cloudformation describe-stack-resources \
 if [ ! -z "$BUCKETS" ]; then
     echo "Emptying S3 buckets..."
     for bucket in $BUCKETS; do
-        if aws s3api head-bucket --bucket "$bucket" --region "$REGION" 2>/dev/null; then
-            echo "Emptying bucket: $bucket"
-            aws s3 rm "s3://$bucket" --recursive --region "$REGION" || true
-            
-            # Remove versioned objects if versioning is enabled
-            aws s3api list-object-versions \
-                --bucket "$bucket" \
-                --query 'Versions[].{Key:Key,VersionId:VersionId}' \
-                --output text \
-                --region "$REGION" 2>/dev/null | while read key version; do
-                if [ ! -z "$key" ] && [ ! -z "$version" ]; then
-                    aws s3api delete-object \
-                        --bucket "$bucket" \
-                        --key "$key" \
-                        --version-id "$version" \
-                        --region "$REGION" || true
-                fi
-            done
-            
-            # Remove delete markers
-            aws s3api list-object-versions \
-                --bucket "$bucket" \
-                --query 'DeleteMarkers[].{Key:Key,VersionId:VersionId}' \
-                --output text \
-                --region "$REGION" 2>/dev/null | while read key version; do
-                if [ ! -z "$key" ] && [ ! -z "$version" ]; then
-                    aws s3api delete-object \
-                        --bucket "$bucket" \
-                        --key "$key" \
-                        --version-id "$version" \
-                        --region "$REGION" || true
-                fi
-            done
-        else
-            echo "Bucket $bucket not found or already deleted"
-        fi
+        empty_s3_bucket "$bucket"
     done
+    echo "All buckets processed."
+else
+    echo "No S3 buckets found in stack."
 fi
-
-# Clean up ECR repository images
-if [ ! -z "$ECR_REPO_NAME" ]; then
-    echo "Cleaning up ECR repository: $ECR_REPO_NAME"
-    if aws ecr describe-repositories --repository-names "$ECR_REPO_NAME" --region "$REGION" > /dev/null 2>&1; then
-        echo "Deleting all images in ECR repository..."
-        IMAGE_IDS=$(aws ecr list-images \
-            --repository-name "$ECR_REPO_NAME" \
-            --query 'imageIds[*]' \
-            --output json \
-            --region "$REGION" 2>/dev/null || echo "[]")
-        
-        if [ "$IMAGE_IDS" != "[]" ] && [ ! -z "$IMAGE_IDS" ]; then
-            aws ecr batch-delete-image \
-                --repository-name "$ECR_REPO_NAME" \
-                --image-ids "$IMAGE_IDS" \
-                --region "$REGION" || true
-        fi
-    else
-        echo "ECR repository $ECR_REPO_NAME not found or already deleted"
-    fi
-fi
-
-# Stop any running builds before deleting projects
-echo "Stopping any running builds..."
-BUILD_PROJECTS=$(aws cloudformation describe-stack-resources \
-    --stack-name "$STACK_NAME" \
-    --query 'StackResources[?ResourceType==`AWS::CodeBuild::Project`].PhysicalResourceId' \
-    --output text \
-    --region "$REGION" 2>/dev/null || echo "")
-
-for project in $BUILD_PROJECTS; do
-    if [ ! -z "$project" ]; then
-        echo "Checking for running builds in project: $project"
-        RUNNING_BUILDS=$(aws codebuild list-builds-for-project \
-            --project-name "$project" \
-            --query 'ids[0]' \
-            --output text \
-            --region "$REGION" 2>/dev/null || echo "")
-        
-        if [ ! -z "$RUNNING_BUILDS" ] && [ "$RUNNING_BUILDS" != "None" ]; then
-            BUILD_STATUS=$(aws codebuild batch-get-builds \
-                --ids "$RUNNING_BUILDS" \
-                --query 'builds[0].buildStatus' \
-                --output text \
-                --region "$REGION" 2>/dev/null || echo "")
-            
-            if [ "$BUILD_STATUS" = "IN_PROGRESS" ]; then
-                echo "Stopping running build: $RUNNING_BUILDS"
-                aws codebuild stop-build --id "$RUNNING_BUILDS" --region "$REGION" || true
-            fi
-        fi
-    fi
-done
 
 # Delete CloudFormation stack
 echo "Deleting CloudFormation stack..."
@@ -182,11 +113,11 @@ fi
 # Clean up local files
 echo "Cleaning up local files..."
 rm -f lab-session-info.txt
-rm -f *-source.zip
-rm -rf sample-projects
+rm -f nodejs-app-source.zip
+rm -rf temp-nodejs-app
 
 echo
-echo "🎉 Advanced CodeBuild Lab Cleanup Complete!"
+echo "🎉 CodeBuild Lab Cleanup Complete!"
 echo
 echo "All AWS resources have been removed."
 echo "You can now run the provisioning script again for a fresh lab environment."

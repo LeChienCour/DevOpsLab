@@ -1,16 +1,16 @@
-# Advanced CodeBuild Lab Guide
+# CodeBuild Lab Guide
 
 ## Objective
-Create and configure advanced CodeBuild projects with multiple build environments, caching strategies, parallel builds, and custom build images. This lab demonstrates sophisticated build automation techniques required for AWS DevOps Professional certification.
+Create and configure AWS CodeBuild projects for automated building and testing of applications. This lab demonstrates essential build automation techniques and integration with CI/CD pipelines as required for AWS DevOps Professional certification.
 
 ## Learning Outcomes
 By completing this lab, you will:
-- Master multiple build environments (Node.js, Python, Java, Docker)
-- Implement effective build caching strategies for faster builds
-- Configure parallel build execution for complex applications
-- Create and use custom Docker build images
-- Integrate security scanning and code quality tools
-- Understand batch builds and build optimization techniques
+- Understand CodeBuild project configuration and execution
+- Master buildspec.yml file structure and commands
+- Implement basic build caching for improved performance
+- Integrate CodeBuild with S3 for artifact storage
+- Monitor build execution and troubleshoot build failures
+- Connect CodeBuild with CodePipeline for complete CI/CD workflows
 
 ## Prerequisites
 - AWS CLI installed and configured with appropriate permissions
@@ -22,46 +22,39 @@ By completing this lab, you will:
 Your AWS user/role needs the following permissions:
 - CloudFormation: Full access for stack management
 - CodeBuild: Full access for build project creation
-- S3: Full access for artifact and cache storage
-- ECR: Full access for custom image management
+- S3: Full access for artifact storage
 - IAM: Permission to create roles and policies
 - CloudWatch Logs: Permission to create and manage log groups
 
 ## Architecture Overview
 
-This lab creates multiple specialized CodeBuild projects:
+This lab creates a simple CodeBuild environment focused on learning fundamentals:
 
 ```
 ┌─────────────────┐    ┌──────────────────┐    ┌─────────────────┐
-│   Source Code   │───▶│   CodeBuild      │───▶│   Artifacts     │
-│   (S3 Buckets)  │    │   Projects       │    │   (S3 Bucket)   │
+│   Source Code   │───▶│   CodeBuild      │───▶│   Build         │
+│   (S3 Bucket)   │    │   Project        │    │   Artifacts     │
+│                 │    │   (Node.js)      │    │   (S3 Bucket)   │
 └─────────────────┘    └──────────────────┘    └─────────────────┘
                                 │
                                 ▼
                        ┌──────────────────┐
-                       │   Build Cache    │
-                       │   (S3 Bucket)    │
-                       └──────────────────┘
-                                │
-                                ▼
-                       ┌──────────────────┐
-                       │   Custom Images  │
-                       │   (ECR Registry) │
+                       │   CloudWatch     │
+                       │   Logs           │
+                       │   (Build Logs)   │
                        └──────────────────┘
 ```
 
-### Build Projects Created:
-- **Node.js Build**: npm/yarn with caching and testing
-- **Python Build**: pip/poetry with security scanning
-- **Java Build**: Maven/Gradle with code quality analysis
-- **Docker Build**: Container builds with layer caching
-- **Parallel Build**: Multi-component parallel execution
-- **Batch Build**: Multiple build configurations
-- **Custom Image Build**: Using custom Docker images
+### Resources Created:
+- **Single CodeBuild Project**: Node.js environment with basic caching
+- **S3 Source Bucket**: For uploading source code
+- **S3 Artifact Bucket**: For storing build outputs
+- **IAM Service Role**: With minimal required permissions
+- **CloudWatch Log Group**: For build execution logs
 
 ## Lab Steps
 
-### Step 1: Provision the Advanced CodeBuild Environment
+### Step 1: Provision the CodeBuild Environment
 
 1. **Navigate to the CodeBuild lab directory:**
    ```bash
@@ -69,18 +62,13 @@ This lab creates multiple specialized CodeBuild projects:
    ```
 
 2. **Review the CloudFormation template:**
-   - Open `templates/advanced-codebuild-projects.yaml`
-   - Examine the different build projects and their configurations
-   - Note the caching strategies and environment variables
+   - Open `templates/codebuild-infrastructure.yaml`
+   - Examine the single build project and its configuration
+   - Note the basic caching strategy and environment variables
 
-3. **Review the buildspec files:**
+3. **Review the buildspec file:**
    ```bash
-   ls -la buildspecs/
    cat buildspecs/buildspec-nodejs.yml
-   cat buildspecs/buildspec-python.yml
-   cat buildspecs/buildspec-java.yml
-   cat buildspecs/buildspec-docker.yml
-   cat buildspecs/buildspec-parallel.yml
    ```
 
 4. **Run the provisioning script:**
@@ -93,217 +81,183 @@ This lab creates multiple specialized CodeBuild projects:
    ```
 
 5. **Monitor the deployment:**
-   - The script creates sample projects for each build type
-   - CloudFormation stack creation takes 5-10 minutes
+   - The script creates a single Node.js build project
+   - CloudFormation stack creation takes 3-5 minutes
    - Sample source code is uploaded to S3 automatically
 
-### Step 2: Explore Build Environments and Caching
+### Step 2: Execute Your First Build
 
 1. **Start a Node.js build:**
    ```bash
    # Get the project name from the session info
-   PROJECT_NAME=$(grep "Node.js Project:" lab-session-info.txt | cut -d' ' -f3)
-   ARTIFACT_BUCKET=$(grep "Artifact Bucket:" lab-session-info.txt | cut -d' ' -f3)
+   PROJECT_NAME=$(grep "Build Project:" lab-session-info.txt | cut -d' ' -f3)
+   SOURCE_BUCKET=$(grep "Source Bucket:" lab-session-info.txt | cut -d' ' -f3)
    
    # Start the build
    aws codebuild start-build \
      --project-name "$PROJECT_NAME" \
-     --source-location "s3://$ARTIFACT_BUCKET/nodejs-app-source.zip"
+     --source-location "s3://$SOURCE_BUCKET/nodejs-app-source.zip"
    ```
 
 2. **Monitor the build progress:**
    - Go to AWS Console → CodeBuild
-   - Find your Node.js project and click on the running build
-   - Observe the build phases and caching behavior
-   - Note the npm cache being populated
+   - Find your build project and click on the running build
+   - Observe the build phases: SUBMITTED → QUEUED → IN_PROGRESS → SUCCEEDED
+   - Examine the build logs to understand each phase
 
-3. **Start a second build to test caching:**
+3. **View build artifacts:**
+   ```bash
+   # Get the artifact bucket name
+   ARTIFACT_BUCKET=$(grep "Artifact Bucket:" lab-session-info.txt | cut -d' ' -f3)
+   
+   # List the build artifacts
+   aws s3 ls "s3://$ARTIFACT_BUCKET/" --recursive
+   ```
+
+4. **Download and examine artifacts:**
+   ```bash
+   # Download the build output
+   aws s3 cp "s3://$ARTIFACT_BUCKET/" ./build-artifacts/ --recursive
+   
+   # Examine the built application
+   ls -la build-artifacts/
+   ```
+
+### Step 3: Test Build Caching
+
+1. **Start a second build to test caching:**
    ```bash
    # Start another build of the same project
    aws codebuild start-build \
      --project-name "$PROJECT_NAME" \
-     --source-location "s3://$ARTIFACT_BUCKET/nodejs-app-source.zip"
+     --source-location "s3://$SOURCE_BUCKET/nodejs-app-source.zip"
    ```
 
-4. **Compare build times:**
+2. **Compare build times:**
    - First build: Dependencies downloaded and cached
    - Second build: Dependencies restored from cache
-   - Note the significant time difference
+   - Note the significant time difference in build logs
 
-### Step 3: Test Different Build Environments
+3. **Examine cache behavior:**
+   - Go to AWS Console → S3
+   - Find your cache bucket (if configured)
+   - Examine cached artifacts and their sizes
+   - Note cache hit/miss patterns in build logs
 
-1. **Start a Python build:**
+### Step 4: Modify Build Configuration
+
+1. **Create a custom buildspec:**
    ```bash
-   PYTHON_PROJECT=$(grep "Python Project:" lab-session-info.txt | cut -d' ' -f3)
+   # Create a new directory for custom source
+   mkdir -p custom-build
    
-   aws codebuild start-build \
-     --project-name "$PYTHON_PROJECT" \
-     --source-location "s3://$ARTIFACT_BUCKET/python-app-source.zip"
-   ```
-
-2. **Start a Java build:**
-   ```bash
-   JAVA_PROJECT=$(grep "Java Project:" lab-session-info.txt | cut -d' ' -f3)
+   # Create a custom buildspec.yml
+   cat > custom-build/buildspec.yml << 'EOF'
+   version: 0.2
+   env:
+     variables:
+       NODE_ENV: production
+       APP_VERSION: 1.2.0
+   phases:
+     install:
+       runtime-versions:
+         nodejs: 18
+     pre_build:
+       commands:
+         - echo "Build started on $(date)"
+         - echo "Node.js version:"
+         - node --version
+         - echo "NPM version:"
+         - npm --version
+     build:
+       commands:
+         - echo "Build phase started on $(date)"
+         - echo "Environment: $NODE_ENV"
+         - echo "Version: $APP_VERSION"
+         - mkdir -p dist
+         - echo '{"name": "codebuild-lab", "version": "'$APP_VERSION'", "environment": "'$NODE_ENV'"}' > dist/app-info.json
+         - echo "<html><body><h1>CodeBuild Lab App</h1><p>Version: $APP_VERSION</p><p>Environment: $NODE_ENV</p></body></html>" > dist/index.html
+     post_build:
+       commands:
+         - echo "Build completed on $(date)"
+         - ls -la dist/
+   artifacts:
+     files:
+       - '**/*'
+     base-directory: dist
+   EOF
    
-   aws codebuild start-build \
-     --project-name "$JAVA_PROJECT" \
-     --source-location "s3://$ARTIFACT_BUCKET/java-app-source.zip"
-   ```
-
-3. **Start a Docker build:**
-   ```bash
-   DOCKER_PROJECT=$(grep "Docker Project:" lab-session-info.txt | cut -d' ' -f3)
-   
-   aws codebuild start-build \
-     --project-name "$DOCKER_PROJECT" \
-     --source-location "s3://$ARTIFACT_BUCKET/docker-app-source.zip"
-   ```
-
-4. **Analyze build differences:**
-   - Compare build times across different environments
-   - Examine the different tools and dependencies used
-   - Note the security scanning in Python and Docker builds
-
-### Step 4: Explore Parallel Build Execution
-
-1. **Create a multi-component project structure:**
-   ```bash
-   mkdir -p multi-app/{frontend,backend}
-   
-   # Create frontend (Node.js)
-   cat > multi-app/frontend/package.json << 'EOF'
+   # Create package.json
+   cat > custom-build/package.json << 'EOF'
    {
-     "name": "frontend-app",
-     "version": "1.0.0",
+     "name": "codebuild-lab-app",
+     "version": "1.2.0",
+     "description": "Simple Node.js app for CodeBuild lab",
      "scripts": {
-       "test": "echo 'Frontend tests passed'",
-       "build": "echo 'Frontend built successfully'"
-     },
-     "devDependencies": {
-       "eslint": "^8.0.0"
+       "test": "echo 'No tests specified'"
      }
    }
    EOF
-   
-   # Create backend (Python)
-   cat > multi-app/backend/requirements.txt << 'EOF'
-   flask==2.3.0
-   pytest==7.4.0
-   EOF
-   
-   cat > multi-app/backend/app.py << 'EOF'
-   from flask import Flask
-   app = Flask(__name__)
-   
-   @app.route('/')
-   def hello():
-       return 'Backend API'
-   EOF
-   
-   # Create archive
-   cd multi-app && zip -r ../multi-app-source.zip . && cd ..
    ```
 
-2. **Upload and test parallel build:**
+2. **Upload and test custom build:**
    ```bash
-   # Upload the multi-component source
-   aws s3 cp multi-app-source.zip "s3://$ARTIFACT_BUCKET/"
+   # Create deployment package
+   cd custom-build && zip -r ../custom-build-source.zip . && cd ..
    
-   # Start parallel build
-   PARALLEL_PROJECT=$(grep "Parallel Project:" lab-session-info.txt | cut -d' ' -f3)
+   # Upload to S3
+   aws s3 cp custom-build-source.zip "s3://$SOURCE_BUCKET/"
    
+   # Start build with custom source
    aws codebuild start-build \
-     --project-name "$PARALLEL_PROJECT" \
-     --source-location "s3://$ARTIFACT_BUCKET/multi-app-source.zip"
+     --project-name "$PROJECT_NAME" \
+     --source-location "s3://$SOURCE_BUCKET/custom-build-source.zip"
    ```
 
-3. **Monitor parallel execution:**
-   - Watch the build logs for parallel task execution
-   - Note how multiple tasks run simultaneously
-   - Examine the parallel execution log and timing
+3. **Monitor the custom build:**
+   - Watch how environment variables are used
+   - Examine the generated artifacts
+   - Note the different build phases and their outputs
 
-### Step 5: Advanced Build Features
+### Step 5: Integration with CodePipeline
 
-1. **Test batch builds:**
+1. **Understand CodeBuild in CI/CD:**
+   - Review how CodeBuild fits into a complete CI/CD pipeline
+   - Understand artifact flow between pipeline stages
+   - Learn about build triggers and automation
+
+2. **Prepare for pipeline integration:**
    ```bash
-   BATCH_PROJECT=$(grep "Batch Project:" lab-session-info.txt | cut -d' ' -f3)
-   
-   # Start a batch build that runs multiple configurations
-   aws codebuild start-build-batch \
-     --project-name "$BATCH_PROJECT" \
-     --source-location "s3://$ARTIFACT_BUCKET/nodejs-app-source.zip"
-   ```
-
-2. **Monitor batch execution:**
-   - Go to AWS Console → CodeBuild → Batch builds
-   - Observe multiple builds running in parallel
-   - Note how different build configurations are tested
-
-3. **Explore build reports:**
-   - Go to AWS Console → CodeBuild → Reports
-   - Examine test results and code coverage reports
-   - Note how different report formats are handled
-
-### Step 6: Custom Build Images (Advanced)
-
-1. **Create a custom build image:**
-   ```bash
-   # Create a Dockerfile for a custom build environment
-   cat > Dockerfile << 'EOF'
-   FROM amazonlinux:2
-   
-   # Install development tools
-   RUN yum update -y && \
-       yum install -y git wget curl unzip && \
-       yum groupinstall -y "Development Tools"
-   
-   # Install Node.js
-   RUN curl -sL https://rpm.nodesource.com/setup_18.x | bash - && \
-       yum install -y nodejs
-   
-   # Install Python
-   RUN yum install -y python3 python3-pip
-   
-   # Install Java
-   RUN yum install -y java-11-openjdk-devel
-   
-   # Install custom tools
-   RUN npm install -g typescript eslint && \
-       pip3 install flake8 pytest
-   
-   # Set environment variables
-   ENV JAVA_HOME=/usr/lib/jvm/java-11-openjdk
-   ENV PATH=$PATH:$JAVA_HOME/bin
-   
-   WORKDIR /codebuild
+   # Create a buildspec optimized for pipeline use
+   cat > pipeline-buildspec.yml << 'EOF'
+   version: 0.2
+   phases:
+     install:
+       runtime-versions:
+         nodejs: 18
+     pre_build:
+       commands:
+         - echo "Pipeline build started on $(date)"
+         - npm install
+     build:
+       commands:
+         - echo "Running build..."
+         - npm run build || echo "No build script defined"
+         - echo "Running tests..."
+         - npm test
+     post_build:
+       commands:
+         - echo "Build completed on $(date)"
+   artifacts:
+     files:
+       - '**/*'
+     name: BuildArtifact
    EOF
+   
+   echo "Buildspec ready for CodePipeline integration"
    ```
 
-2. **Build and push the custom image:**
-   ```bash
-   # Get ECR repository URI
-   ECR_REPO=$(grep "ECR Repository:" lab-session-info.txt | cut -d' ' -f3)
-   
-   # Login to ECR
-   aws ecr get-login-password --region $AWS_DEFAULT_REGION | \
-     docker login --username AWS --password-stdin $ECR_REPO
-   
-   # Build and push
-   docker build -t custom-build-env .
-   docker tag custom-build-env:latest $ECR_REPO:latest
-   docker push $ECR_REPO:latest
-   ```
-
-3. **Test the custom image build:**
-   ```bash
-   CUSTOM_PROJECT=$(grep "Custom Image Project:" lab-session-info.txt | cut -d' ' -f3)
-   
-   aws codebuild start-build \
-     --project-name "$CUSTOM_PROJECT" \
-     --source-location "s3://$ARTIFACT_BUCKET/nodejs-app-source.zip"
-   ```
-
-### Step 7: Build Optimization and Monitoring
+### Step 6: Monitor and Troubleshoot Builds
 
 1. **Analyze build performance:**
    ```bash
@@ -320,17 +274,21 @@ This lab creates multiple specialized CodeBuild projects:
    aws codebuild batch-get-builds --ids "$BUILD_ID"
    ```
 
-2. **Monitor cache effectiveness:**
-   - Go to AWS Console → S3
-   - Find your cache bucket
-   - Examine cached artifacts and their sizes
-   - Note cache hit/miss patterns in build logs
+2. **Review build logs:**
+   ```bash
+   # View build logs
+   aws logs get-log-events \
+     --log-group-name "/aws/codebuild/$PROJECT_NAME" \
+     --log-stream-name "$BUILD_ID" \
+     --query 'events[*].message' \
+     --output text
+   ```
 
-3. **Set up CloudWatch alarms:**
+3. **Set up basic monitoring:**
    ```bash
    # Create alarm for build failures
    aws cloudwatch put-metric-alarm \
-     --alarm-name "CodeBuild-Failures" \
+     --alarm-name "CodeBuild-Lab-Failures" \
      --alarm-description "Alert on CodeBuild failures" \
      --metric-name "FailedBuilds" \
      --namespace "AWS/CodeBuild" \
@@ -339,35 +297,6 @@ This lab creates multiple specialized CodeBuild projects:
      --threshold 1 \
      --comparison-operator "GreaterThanOrEqualToThreshold" \
      --evaluation-periods 1
-   ```
-
-### Step 8: Security and Compliance Integration
-
-1. **Review security scan results:**
-   - Examine Trivy security scan reports from Docker builds
-   - Review Bandit security analysis from Python builds
-   - Check dependency vulnerability scans
-
-2. **Implement compliance checks:**
-   ```bash
-   # Add compliance buildspec
-   cat > buildspecs/buildspec-compliance.yml << 'EOF'
-   version: 0.2
-   phases:
-     install:
-       runtime-versions:
-         python: 3.9
-       commands:
-         - pip install checkov
-     build:
-       commands:
-         - echo "Running compliance checks..."
-         - checkov -f . --framework cloudformation || true
-         - echo "Compliance scan completed"
-   artifacts:
-     files:
-       - '**/*'
-   EOF
    ```
 
 ## Troubleshooting Guide
@@ -416,28 +345,18 @@ aws s3 ls "s3://$ARTIFACT_BUCKET/" --recursive
 
 This lab creates the following AWS resources:
 
-### Build Projects
-- **Node.js Build Project**: npm/yarn with caching and testing
-- **Python Build Project**: pip/poetry with security scanning
-- **Java Build Project**: Maven/Gradle with quality analysis
-- **Docker Build Project**: Container builds with layer caching
-- **Parallel Build Project**: Multi-component parallel execution
-- **Batch Build Project**: Multiple build configurations
-- **Custom Image Build Project**: Using custom Docker images
-
-### Supporting Resources
-- **S3 Artifact Bucket**: Storage for build artifacts
-- **S3 Cache Bucket**: Storage for build caching with lifecycle policies
-- **ECR Repository**: Custom build images with scanning enabled
+### Core Build Resources
+- **CodeBuild Project**: Single Node.js build project with basic caching
+- **S3 Source Bucket**: Source code storage
+- **S3 Artifact Bucket**: Build output storage
 - **IAM Service Role**: Permissions for CodeBuild operations
-- **CloudWatch Log Groups**: Build execution logs with retention policies
+- **CloudWatch Log Group**: Build execution logs
 
-### Estimated Costs
-- CodeBuild: $0.005/minute for build time
-- S3 Storage: $0.023/GB/month for artifacts and cache
-- ECR Storage: $0.10/GB/month for custom images
-- CloudWatch Logs: $0.50/GB ingested
-- **Total estimated cost**: $5-15/month for regular use
+### Estimated Costs (Free Tier Eligible)
+- CodeBuild: 100 build minutes/month free, then $0.005/minute
+- S3 Storage: 5GB free, then $0.023/GB/month
+- CloudWatch Logs: 5GB free, then $0.50/GB ingested
+- **Total estimated cost**: $0-5/month for regular use (mostly free tier)
 
 ## Cleanup
 
