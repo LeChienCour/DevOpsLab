@@ -209,7 +209,25 @@ Resources:
         Image: aws/codebuild/amazonlinux2-x86_64-standard:3.0
       Source:
         Type: CODEPIPELINE
-        BuildSpec: buildspec-test.yml
+        BuildSpec: |
+          version: 0.2
+          phases:
+            pre_build:
+              commands:
+                - echo "Test phase started on $(date)"
+            build:
+              commands:
+                - echo "Running tests..."
+                - ls -la
+                - test -f index.html && echo "index.html found" || (echo "index.html not found" && exit 1)
+                - test -f error.html && echo "error.html found" || (echo "error.html not found" && exit 1)
+                - echo "Basic file validation passed"
+            post_build:
+              commands:
+                - echo "Test phase completed on $(date)"
+          artifacts:
+            files:
+              - '**/*'
       Tags:
         - Key: Project
           Value: !Ref ProjectName
@@ -235,7 +253,7 @@ Resources:
               Configuration:
                 S3Bucket: !Ref SourceBucket
                 S3ObjectKey: source-code.zip
-                PollForSourceChanges: false
+                PollForSourceChanges: true
               OutputArtifacts:
                 - Name: SourceOutput
         - Name: Build

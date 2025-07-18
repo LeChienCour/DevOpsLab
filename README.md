@@ -24,8 +24,9 @@ Comprehensive labs covering continuous integration and deployment pipelines with
 
 #### CodePipeline Lab
 - **Objective**: Multi-stage CI/CD pipeline with source, build, test, and deploy stages
-- **Services**: CodePipeline, CodeCommit, CodeBuild, S3, CloudWatch Events
+- **Services**: CodePipeline, S3, CodeBuild, CloudWatch
 - **Features**:
+  - S3-based source control (no external Git provider needed)
   - Automated pipeline triggering
   - Artifact management and versioning
   - Pipeline monitoring and notifications
@@ -321,7 +322,7 @@ Progressive laboratory series covering all aspects of Kubernetes administration 
 - **Compute**: EC2, ECS, Lambda, Auto Scaling Groups
 - **Storage**: S3, EBS
 - **Networking**: VPC, ALB, Security Groups
-- **Developer Tools**: CodePipeline, CodeBuild, CodeDeploy, CodeCommit
+- **Developer Tools**: CodePipeline, CodeBuild, CodeDeploy
 - **Management**: CloudFormation, CloudWatch, IAM
 - **Container**: ECR, ECS, Fargate
 

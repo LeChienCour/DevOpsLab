@@ -14,5 +14,12 @@
     "resources": [],
     "estimated_cost": 5.0,
     "end_time": "2025-07-18T00:50:32.399579"
+  },
+  "cicd-codepipeline-20250718-082807": {
+    "lab_id": "cicd-codepipeline",
+    "start_time": "2025-07-18T08:28:07.374012",
+    "status": "running",
+    "resources": [],
+    "estimated_cost": 5.0
   }
 }

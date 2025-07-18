@@ -146,44 +146,22 @@ This lab creates the following architecture:
    phases:
      pre_build:
        commands:
-         - echo Build started on `date`
-         - echo Environment: $APP_ENV
-         - echo Version: $BUILD_VERSION
+         - echo "Build started on $(date)"
+         - echo "Environment - $APP_ENV"
+         - echo "Version - $BUILD_VERSION"
      build:
        commands:
-         - echo Build phase started on `date`
+         - echo "Build phase started on $(date)"
          - mkdir -p dist
-         - echo '<html><body><h1>DevOps Pipeline Lab - $APP_ENV</h1><p>Version: $BUILD_VERSION</p><p>Build completed on $(date)</p><p>Build ID: $CODEBUILD_BUILD_ID</p></body></html>' > dist/index.html
-         - echo '<html><body><h1>Error Page</h1><p>Something went wrong in $APP_ENV!</p></body></html>' > dist/error.html
+         - echo "<html><body><h1>DevOps Pipeline Lab - $APP_ENV</h1><p>Version - $BUILD_VERSION</p><p>Build completed on $(date)</p><p>Build ID - $CODEBUILD_BUILD_ID</p></body></html>" > dist/index.html
+         - echo "<html><body><h1>Error Page</h1><p>Something went wrong in $APP_ENV</p></body></html>" > dist/error.html
      post_build:
        commands:
-         - echo Build completed on `date`
+         - echo "Build completed on $(date)"
    artifacts:
      files:
        - '**/*'
      base-directory: dist
-   EOF
-
-   # Create a separate buildspec for the test stage
-   cat > updated-source/buildspec-test.yml << 'EOF'
-   version: 0.2
-   phases:
-   pre_build:
-      commands:
-         - echo Test phase started on `date`
-   build:
-      commands:
-         - echo Running tests...
-         - ls -la
-         - test -f index.html && echo 'index.html found' || (echo 'index.html not found' && exit 1)
-         - test -f error.html && echo 'error.html found' || (echo 'error.html not found' && exit 1)
-         - echo 'Basic file validation passed'
-   post_build:
-      commands:
-         - echo Test phase completed on `date`
-   artifacts:
-   files:
-      - '**/*'
    EOF
 
    # Create updated README
@@ -201,14 +179,8 @@ This lab creates the following architecture:
 
 2. **Upload the updated source code:**
    ```bash
-   # Get the source bucket name from the CloudFormation stack outputs
-   SOURCE_BUCKET=$(aws cloudformation describe-stacks \
-     --stack-name devops-pipeline-lab-stack \
-     --query 'Stacks[0].Outputs[?OutputKey==`SourceBucket`].OutputValue' \
-     --output text)
-   
-   echo "Source bucket: $SOURCE_BUCKET"
-   
+   # Get the source bucket name from lab-session-info.txt
+   SOURCE_BUCKET=$(grep "Source Bucket:" lab-session-info.txt | cut -d':' -f2 | xargs)
    # Create new source package
    cd updated-source && zip -r ../updated-source-code.zip . && cd ..
    
@@ -250,28 +222,6 @@ This lab creates the following architecture:
        - non_existent_file.html  # Reference a file that doesn't exist
    EOF
 
-   # Create a separate buildspec for the test stage
-   cat > updated-source/buildspec-test.yml << 'EOF'
-   version: 0.2
-   phases:
-   pre_build:
-      commands:
-         - echo Test phase started on `date`
-   build:
-      commands:
-         - echo Running tests...
-         - ls -la
-         - test -f index.html && echo 'index.html found' || (echo 'index.html not found' && exit 1)
-         - test -f error.html && echo 'error.html found' || (echo 'error.html not found' && exit 1)
-         - echo 'Basic file validation passed'
-   post_build:
-      commands:
-         - echo Test phase completed on `date`
-   artifacts:
-   files:
-      - '**/*'
-   EOF
-
    # Create simple README
    echo '# Broken Version - This will fail' > broken-source/README.md
    ```
@@ -279,12 +229,7 @@ This lab creates the following architecture:
 2. **Upload the broken source code:**
    ```bash
    # Get the source bucket name (if not already set from Step 5)
-   if [ -z "$SOURCE_BUCKET" ]; then
-     SOURCE_BUCKET=$(aws cloudformation describe-stacks \
-       --stack-name devops-pipeline-lab-stack \
-       --query 'Stacks[0].Outputs[?OutputKey==`SourceBucket`].OutputValue' \
-       --output text)
-   fi
+   SOURCE_BUCKET=$(grep "Source Bucket:" lab-session-info.txt | cut -d':' -f2 | xargs)
    
    echo "Source bucket: $SOURCE_BUCKET"
    
@@ -322,13 +267,10 @@ This lab creates the following architecture:
    - Configure SNS notifications (optional)
 
 2. **Explore pipeline metrics:**
-   - Pipeline execution duration
-   - Success/failure rates
-   - Stage-specific metrics
-
-3. **Review CloudWatch Events:**
-   - Examine the event rule that triggers the pipeline
-   - Understand how repository changes trigger executions
+   - Go to CloudWatch → Metrics → CodePipeline
+   - View "Pipeline Execution Duration" metrics to track performance
+   - Check "SuccessCount" and "FailureCount" metrics for reliability
+   - Examine stage-specific metrics like "BuildSuccessCount" and "DeploymentTime"
 
 ### Step 8: Pipeline Optimization and Best Practices
 
@@ -349,9 +291,7 @@ This lab creates the following architecture:
 ### Common Issues and Solutions
 
 1. **Pipeline not triggering automatically:**
-   - Verify CloudWatch Events rule is enabled
    - Check IAM permissions for the event role
-   - Ensure you're pushing to the 'main' branch
 
 2. **Build failures:**
    - Check CodeBuild logs in CloudWatch
@@ -421,7 +361,7 @@ When you're finished with the lab:
 
 2. **Verify cleanup:**
    - Check AWS Console to ensure all resources are removed
-   - Confirm S3 buckets are deleted
+   - Confirm S3 buckets are deleted (specially the source bucket with versioning enabled)
    - Verify CloudFormation stack is deleted
 
 3. **Clean up local files:**

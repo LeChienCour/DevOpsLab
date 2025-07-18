@@ -74,7 +74,7 @@ phases:
         <body>
           <h1>Hello from DevOps Pipeline Lab!</h1>
           <p>Build completed on $(date)</p>
-          <p>Build ID: ${CODEBUILD_BUILD_ID}</p>
+          <p>Build ID: $CODEBUILD_BUILD_ID</p>
         </body>
         </html>
         HTML
@@ -96,27 +96,7 @@ artifacts:
   base-directory: dist
 EOF
 
-# Create a separate buildspec for the test stage
-cat > temp-repo/buildspec-test.yml << 'EOF'
-version: 0.2
-phases:
-  pre_build:
-    commands:
-      - echo Test phase started on `date`
-  build:
-    commands:
-      - echo Running tests...
-      - ls -la
-      - test -f index.html && echo 'index.html found' || (echo 'index.html not found' && exit 1)
-      - test -f error.html && echo 'error.html found' || (echo 'error.html not found' && exit 1)
-      - echo 'Basic file validation passed'
-  post_build:
-    commands:
-      - echo Test phase completed on `date`
-artifacts:
-  files:
-    - '**/*'
-EOF
+
 
 # Create zip file for initial commit
 echo "Creating source code archive..."

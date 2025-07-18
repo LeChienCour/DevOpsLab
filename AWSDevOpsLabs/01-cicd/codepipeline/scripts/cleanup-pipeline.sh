@@ -209,10 +209,13 @@ else
         
         if [ "$FINAL_STATUS" = "STACK_NOT_FOUND" ]; then
             echo "✅ Stack deletion completed after retry"
+        elif [ "$FINAL_STATUS" = "DELETE_COMPLETE" ]; then
+            echo "✅ Stack deletion completed successfully"
         else
             echo "❌ Stack deletion still failed. Final status: $FINAL_STATUS"
             echo "Please manually delete the stack and remaining resources in the AWS Console"
             echo "You can also try running this script again"
+            exit 1
         fi
     fi
 fi
