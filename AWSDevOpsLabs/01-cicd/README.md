@@ -11,7 +11,6 @@ This module covers AWS CI/CD services including CodePipeline, CodeBuild, and Cod
 ## Prerequisites
 
 - AWS CLI configured
-- CodeCommit repository access
 - Basic understanding of CI/CD concepts
 
 ## Estimated Costs

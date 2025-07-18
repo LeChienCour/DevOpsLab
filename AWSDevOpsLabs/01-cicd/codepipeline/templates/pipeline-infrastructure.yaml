@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: 'CodePipeline multi-stage pipeline infrastructure with source, build, test, and deploy stages'
+Description: 'CodePipeline multi-stage pipeline infrastructure with S3 source, build, test, and deploy stages'
 
 Parameters:
   ProjectName:
@@ -7,10 +7,9 @@ Parameters:
     Default: 'devops-pipeline-lab'
     Description: 'Name of the project for resource naming'
   
-  CodeCommitRepoName:
+  SourceBucketName:
     Type: String
-    Default: 'devops-lab-repo'
-    Description: 'Name of the CodeCommit repository'
+    Description: 'S3 bucket name for source code (must be globally unique)'
   
   ArtifactBucketName:
     Type: String
@@ -26,8 +25,6 @@ Resources:
     Type: AWS::S3::Bucket
     Properties:
       BucketName: !Ref ArtifactBucketName
-      VersioningConfiguration:
-        Status: Enabled
       BucketEncryption:
         ServerSideEncryptionConfiguration:
           - ServerSideEncryptionByDefault:
@@ -55,26 +52,38 @@ Resources:
         ServerSideEncryptionConfiguration:
           - ServerSideEncryptionByDefault:
               SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: false
+        BlockPublicPolicy: false
+        IgnorePublicAcls: false
+        RestrictPublicBuckets: false
       Tags:
         - Key: Project
           Value: !Ref ProjectName
         - Key: Purpose
           Value: 'Application Deployment'
 
-  # CodeCommit Repository
-  CodeRepository:
-    Type: AWS::CodeCommit::Repository
+  # S3 Bucket for Source Code
+  SourceBucket:
+    Type: AWS::S3::Bucket
     Properties:
-      RepositoryName: !Ref CodeCommitRepoName
-      RepositoryDescription: 'Repository for DevOps pipeline lab'
-      Code:
-        S3:
-          Bucket: !Ref ArtifactStore
-          Key: 'initial-code.zip'
-        BranchName: 'main'
+      BucketName: !Ref SourceBucketName
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
       Tags:
         - Key: Project
           Value: !Ref ProjectName
+        - Key: Purpose
+          Value: 'Source Code'
 
   # IAM Role for CodePipeline
   CodePipelineServiceRole:
@@ -96,31 +105,33 @@ Resources:
               - Effect: Allow
                 Action:
                   - s3:GetBucketVersioning
+                  - s3:ListBucket
                   - s3:GetObject
                   - s3:GetObjectVersion
                   - s3:PutObject
                 Resource:
-                  - !Sub '${ArtifactStore}/*'
+                  - !Sub '${ArtifactStore.Arn}/*'
                   - !GetAtt ArtifactStore.Arn
+                  - !Sub '${SourceBucket.Arn}/*'
+                  - !GetAtt SourceBucket.Arn
               - Effect: Allow
                 Action:
-                  - codecommit:CancelUploadArchive
-                  - codecommit:GetBranch
-                  - codecommit:GetCommit
-                  - codecommit:GetRepository
-                  - codecommit:ListBranches
-                  - codecommit:ListRepositories
-                Resource: !GetAtt CodeRepository.Arn
+                  - s3:PutObject
+                  - s3:PutObjectAcl
+                  - s3:PutObjectVersionAcl
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                  - s3:GetBucketVersioning
+                Resource:
+                  - !Sub '${DeploymentBucket.Arn}/*'
+                  - !GetAtt DeploymentBucket.Arn
               - Effect: Allow
                 Action:
                   - codebuild:BatchGetBuilds
                   - codebuild:StartBuild
-                Resource: !GetAtt CodeBuildProject.Arn
-              - Effect: Allow
-                Action:
-                  - codebuild:BatchGetBuilds
-                  - codebuild:StartBuild
-                Resource: !GetAtt CodeBuildTestProject.Arn
+                Resource: 
+                  - !GetAtt CodeBuildProject.Arn
+                  - !GetAtt CodeBuildTestProject.Arn
       Tags:
         - Key: Project
           Value: !Ref ProjectName
@@ -154,12 +165,14 @@ Resources:
                   - s3:GetObjectVersion
                   - s3:PutObject
                 Resource:
-                  - !Sub '${ArtifactStore}/*'
-                  - !Sub '${DeploymentBucket}/*'
+                  - !Sub '${ArtifactStore.Arn}/*'
+                  - !GetAtt ArtifactStore.Arn
+                  - !Sub '${DeploymentBucket.Arn}/*'
+                  - !GetAtt DeploymentBucket.Arn
       Tags:
         - Key: Project
           Value: !Ref ProjectName  # Code
-Build Project for Build Stage
+# Build Project for Build Stage
   CodeBuildProject:
     Type: AWS::CodeBuild::Project
     Properties:
@@ -177,27 +190,6 @@ Build Project for Build Stage
             Value: !Ref DeploymentBucket
       Source:
         Type: CODEPIPELINE
-        BuildSpec: |
-          version: 0.2
-          phases:
-            pre_build:
-              commands:
-                - echo Logging in to Amazon ECR...
-                - echo Build started on `date`
-            build:
-              commands:
-                - echo Build phase started on `date`
-                - echo Building the application...
-                - mkdir -p dist
-                - echo "<html><body><h1>Hello from DevOps Pipeline Lab!</h1><p>Build completed on $(date)</p></body></html>" > dist/index.html
-                - echo "<html><body><h1>Error Page</h1><p>Something went wrong!</p></body></html>" > dist/error.html
-            post_build:
-              commands:
-                - echo Build completed on `date`
-          artifacts:
-            files:
-              - '**/*'
-            base-directory: dist
       Tags:
         - Key: Project
           Value: !Ref ProjectName
@@ -217,25 +209,7 @@ Build Project for Build Stage
         Image: aws/codebuild/amazonlinux2-x86_64-standard:3.0
       Source:
         Type: CODEPIPELINE
-        BuildSpec: |
-          version: 0.2
-          phases:
-            pre_build:
-              commands:
-                - echo Test phase started on `date`
-            build:
-              commands:
-                - echo Running tests...
-                - ls -la
-                - test -f index.html && echo "index.html found" || (echo "index.html not found" && exit 1)
-                - test -f error.html && echo "error.html found" || (echo "error.html not found" && exit 1)
-                - echo "Basic file validation passed"
-            post_build:
-              commands:
-                - echo Test phase completed on `date`
-          artifacts:
-            files:
-              - '**/*'
+        BuildSpec: buildspec-test.yml
       Tags:
         - Key: Project
           Value: !Ref ProjectName
@@ -256,11 +230,11 @@ Build Project for Build Stage
               ActionTypeId:
                 Category: Source
                 Owner: AWS
-                Provider: CodeCommit
+                Provider: S3
                 Version: '1'
               Configuration:
-                RepositoryName: !GetAtt CodeRepository.Name
-                BranchName: main
+                S3Bucket: !Ref SourceBucket
+                S3ObjectKey: source-code.zip
                 PollForSourceChanges: false
               OutputArtifacts:
                 - Name: SourceOutput
@@ -309,57 +283,41 @@ Build Project for Build Stage
         - Key: Project
           Value: !Ref ProjectName
 
-  # CloudWatch Event Rule for Pipeline Trigger
-  PipelineTriggerRule:
-    Type: AWS::Events::Rule
+  # S3 Bucket Policy for Pipeline Access
+  SourceBucketPolicy:
+    Type: AWS::S3::BucketPolicy
     Properties:
-      Name: !Sub '${ProjectName}-pipeline-trigger'
-      Description: 'Trigger pipeline on CodeCommit changes'
-      EventPattern:
-        source:
-          - aws.codecommit
-        detail-type:
-          - CodeCommit Repository State Change
-        resources:
-          - !GetAtt CodeRepository.Arn
-        detail:
-          event:
-            - referenceCreated
-            - referenceUpdated
-          referenceType:
-            - branch
-          referenceName:
-            - main
-      State: ENABLED
-      Targets:
-        - Arn: !Sub 'arn:aws:codepipeline:${AWS::Region}:${AWS::AccountId}:pipeline/${CodePipeline}'
-          Id: 'CodePipelineTarget'
-          RoleArn: !GetAtt CloudWatchEventRole.Arn
-
-  # IAM Role for CloudWatch Events
-  CloudWatchEventRole:
-    Type: AWS::IAM::Role
-    Properties:
-      RoleName: !Sub '${ProjectName}-cloudwatch-event-role'
-      AssumeRolePolicyDocument:
+      Bucket: !Ref SourceBucket
+      PolicyDocument:
         Version: '2012-10-17'
         Statement:
           - Effect: Allow
             Principal:
-              Service: events.amazonaws.com
-            Action: sts:AssumeRole
-      Policies:
-        - PolicyName: CloudWatchEventPolicy
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-              - Effect: Allow
-                Action:
-                  - codepipeline:StartPipelineExecution
-                Resource: !Sub 'arn:aws:codepipeline:${AWS::Region}:${AWS::AccountId}:pipeline/${CodePipeline}'
-      Tags:
-        - Key: Project
-          Value: !Ref ProjectName
+              AWS: !GetAtt CodePipelineServiceRole.Arn
+            Action:
+              - s3:GetObject
+              - s3:GetObjectVersion
+            Resource: !Sub '${SourceBucket.Arn}/*'
+          - Effect: Allow
+            Principal:
+              AWS: !GetAtt CodePipelineServiceRole.Arn
+            Action:
+              - s3:ListBucket
+              - s3:GetBucketVersioning
+            Resource: !GetAtt SourceBucket.Arn
+
+  # S3 Bucket Policy for Public Website Access
+  DeploymentBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref DeploymentBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: '*'
+            Action: s3:GetObject
+            Resource: !Sub '${DeploymentBucket.Arn}/*'
 
 Outputs:
   PipelineName:
@@ -368,11 +326,11 @@ Outputs:
     Export:
       Name: !Sub '${AWS::StackName}-PipelineName'
   
-  RepositoryCloneUrl:
-    Description: 'HTTPS clone URL of the CodeCommit repository'
-    Value: !GetAtt CodeRepository.CloneUrlHttp
+  SourceBucket:
+    Description: 'S3 bucket for source code'
+    Value: !Ref SourceBucket
     Export:
-      Name: !Sub '${AWS::StackName}-RepoCloneUrl'
+      Name: !Sub '${AWS::StackName}-SourceBucket'
   
   DeploymentUrl:
     Description: 'URL of the deployed application'
