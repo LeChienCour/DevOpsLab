@@ -90,13 +90,10 @@ This lab creates a simple CodeBuild environment focused on learning fundamentals
 1. **Start a Node.js build:**
    ```bash
    # Get the project name from the session info
-   PROJECT_NAME=$(grep "Build Project:" lab-session-info.txt | cut -d' ' -f3)
-   SOURCE_BUCKET=$(grep "Source Bucket:" lab-session-info.txt | cut -d' ' -f3)
+   PROJECT_NAME=$(grep "Build Project:" lab-session-info.txt | cut -d' ' -f4)
    
    # Start the build
-   aws codebuild start-build \
-     --project-name "$PROJECT_NAME" \
-     --source-location "s3://$SOURCE_BUCKET/nodejs-app-source.zip"
+   aws codebuild start-build --project-name "$PROJECT_NAME"
    ```
 
 2. **Monitor the build progress:**
@@ -108,7 +105,7 @@ This lab creates a simple CodeBuild environment focused on learning fundamentals
 3. **View build artifacts:**
    ```bash
    # Get the artifact bucket name
-   ARTIFACT_BUCKET=$(grep "Artifact Bucket:" lab-session-info.txt | cut -d' ' -f3)
+   ARTIFACT_BUCKET=$(grep "Artifact Bucket:" lab-session-info.txt | cut -d' ' -f4)
    
    # List the build artifacts
    aws s3 ls "s3://$ARTIFACT_BUCKET/" --recursive
@@ -127,10 +124,11 @@ This lab creates a simple CodeBuild environment focused on learning fundamentals
 
 1. **Start a second build to test caching:**
    ```bash
+   # Get the project name from the session info
+   PROJECT_NAME=$(grep "Build Project:" lab-session-info.txt | cut -d' ' -f4)
+
    # Start another build of the same project
-   aws codebuild start-build \
-     --project-name "$PROJECT_NAME" \
-     --source-location "s3://$SOURCE_BUCKET/nodejs-app-source.zip"
+   aws codebuild start-build --project-name "$PROJECT_NAME"
    ```
 
 2. **Compare build times:**
@@ -139,10 +137,16 @@ This lab creates a simple CodeBuild environment focused on learning fundamentals
    - Note the significant time difference in build logs
 
 3. **Examine cache behavior:**
-   - Go to AWS Console → S3
-   - Find your cache bucket (if configured)
-   - Examine cached artifacts and their sizes
-   - Note cache hit/miss patterns in build logs
+   ```bash
+   # Check the artifact bucket for cache files after the second build
+   ARTIFACT_BUCKET=$(grep "Artifact Bucket:" lab-session-info.txt | cut -d' ' -f4)
+   
+   # List cache contents
+   aws s3 ls "s3://$ARTIFACT_BUCKET/build-cache/" --recursive
+   ```
+   - Compare the build logs between first and second builds
+   - Look for cache-related messages in the build logs
+   - Note the difference in dependency installation time
 
 ### Step 4: Modify Build Configuration
 
@@ -202,16 +206,14 @@ This lab creates a simple CodeBuild environment focused on learning fundamentals
 
 2. **Upload and test custom build:**
    ```bash
-   # Create deployment package
-   cd custom-build && zip -r ../custom-build-source.zip . && cd ..
+   # Create deployment package (replace the existing source)
+   cd custom-build && zip -r ../nodejs-app-source.zip . && cd ..
    
-   # Upload to S3
-   aws s3 cp custom-build-source.zip "s3://$SOURCE_BUCKET/"
+   # Upload to S3 (replacing the existing file)
+   aws s3 cp nodejs-app-source.zip "s3://$SOURCE_BUCKET/"
    
-   # Start build with custom source
-   aws codebuild start-build \
-     --project-name "$PROJECT_NAME" \
-     --source-location "s3://$SOURCE_BUCKET/custom-build-source.zip"
+   # Start build (uses the updated source automatically)
+   aws codebuild start-build --project-name "$PROJECT_NAME"
    ```
 
 3. **Monitor the custom build:**
@@ -219,84 +221,43 @@ This lab creates a simple CodeBuild environment focused on learning fundamentals
    - Examine the generated artifacts
    - Note the different build phases and their outputs
 
-### Step 5: Integration with CodePipeline
-
-1. **Understand CodeBuild in CI/CD:**
-   - Review how CodeBuild fits into a complete CI/CD pipeline
-   - Understand artifact flow between pipeline stages
-   - Learn about build triggers and automation
-
-2. **Prepare for pipeline integration:**
-   ```bash
-   # Create a buildspec optimized for pipeline use
-   cat > pipeline-buildspec.yml << 'EOF'
-   version: 0.2
-   phases:
-     install:
-       runtime-versions:
-         nodejs: 18
-     pre_build:
-       commands:
-         - echo "Pipeline build started on $(date)"
-         - npm install
-     build:
-       commands:
-         - echo "Running build..."
-         - npm run build || echo "No build script defined"
-         - echo "Running tests..."
-         - npm test
-     post_build:
-       commands:
-         - echo "Build completed on $(date)"
-   artifacts:
-     files:
-       - '**/*'
-     name: BuildArtifact
-   EOF
-   
-   echo "Buildspec ready for CodePipeline integration"
-   ```
-
-### Step 6: Monitor and Troubleshoot Builds
+### Step 5: Monitor and Troubleshoot Builds
 
 1. **Analyze build performance:**
    ```bash
+   # Get the project name from the session info
+   PROJECT_NAME=$(grep "Build Project:" lab-session-info.txt | cut -d' ' -f4)
+
    # Get build metrics
    aws codebuild list-builds-for-project \
      --project-name "$PROJECT_NAME" \
      --sort-order DESCENDING
    
-   # Get detailed build information
+   # Get the most recent build ID
    BUILD_ID=$(aws codebuild list-builds-for-project \
      --project-name "$PROJECT_NAME" \
-     --query 'ids[0]' --output text)
+     --query 'ids[0]' \
+     --output text)
    
+   # Get detailed build information
    aws codebuild batch-get-builds --ids "$BUILD_ID"
    ```
 
 2. **Review build logs:**
    ```bash
+   # Extract project name and log stream from build ID to avoid Git Bash path issues
+   PROJECT_FROM_BUILD=$(echo "$BUILD_ID" | cut -d':' -f1)
+   LOG_STREAM=$(echo "$BUILD_ID" | cut -d':' -f2)
+   
+   # For Windows use MSYS_NO_PATHCONV=1 before the command
    # View build logs
-   aws logs get-log-events \
-     --log-group-name "/aws/codebuild/$PROJECT_NAME" \
-     --log-stream-name "$BUILD_ID" \
-     --query 'events[*].message' \
-     --output text
+   aws logs get-log-events --log-group-name "/aws/codebuild/$PROJECT_FROM_BUILD" --log-stream-name "$LOG_STREAM" --query 'events[*].message' --output text
    ```
 
 3. **Set up basic monitoring:**
    ```bash
    # Create alarm for build failures
-   aws cloudwatch put-metric-alarm \
-     --alarm-name "CodeBuild-Lab-Failures" \
-     --alarm-description "Alert on CodeBuild failures" \
-     --metric-name "FailedBuilds" \
-     --namespace "AWS/CodeBuild" \
-     --statistic "Sum" \
-     --period 300 \
-     --threshold 1 \
-     --comparison-operator "GreaterThanOrEqualToThreshold" \
-     --evaluation-periods 1
+   aws cloudwatch put-metric-alarm --alarm-name "CodeBuild-Lab-Failures" --alarm-description "Alert on CodeBuild failures" --metric-name "FailedBuilds" --namespace "AWS/CodeBuild" --statistic "Sum" --period 300 --threshold 1 --comparison-operator "GreaterThanOrEqualToThreshold" --evaluation-periods 1
    ```
 
 ## Troubleshooting Guide
@@ -326,16 +287,18 @@ This lab creates a simple CodeBuild environment focused on learning fundamentals
 ### Debugging Commands
 
 ```bash
-# View build logs
+# View build logs (extract project name and log stream from build ID)
+PROJECT_FROM_BUILD=$(echo "$BUILD_ID" | cut -d':' -f1)
+LOG_STREAM=$(echo "$BUILD_ID" | cut -d':' -f2)
 aws logs get-log-events \
-  --log-group-name "/aws/codebuild/$PROJECT_NAME" \
-  --log-stream-name "$BUILD_ID"
+  --log-group-name "/aws/codebuild/$PROJECT_FROM_BUILD" \
+  --log-stream-name "$LOG_STREAM"
 
-# Check build project configuration
-aws codebuild batch-get-projects --names "$PROJECT_NAME"
+# Check build project configuration (use project name from build ID)
+aws codebuild batch-get-projects --names "$PROJECT_FROM_BUILD"
 
-# List all builds for a project
-aws codebuild list-builds-for-project --project-name "$PROJECT_NAME"
+# List all builds for a project (use project name from build ID)
+aws codebuild list-builds-for-project --project-name "$PROJECT_FROM_BUILD"
 
 # Get build artifacts
 aws s3 ls "s3://$ARTIFACT_BUCKET/" --recursive
@@ -374,13 +337,14 @@ When you're finished with the lab:
 2. **Verify cleanup:**
    - Check AWS Console to ensure all resources are removed
    - Confirm S3 buckets are deleted
-   - Verify ECR repository is cleaned up
    - Check CloudFormation stack is deleted
+   - Review CloudWatch Alarms
 
 3. **Clean up local files:**
    ```bash
-   rm -f Dockerfile multi-app-source.zip
-   rm -rf multi-app
+   # Remove any custom build files created during the lab
+   rm -rf custom-build
+   rm -f nodejs-app-source.zip
    ```
 
 ## Next Steps

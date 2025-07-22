@@ -115,6 +115,7 @@ echo "Cleaning up local files..."
 rm -f lab-session-info.txt
 rm -f nodejs-app-source.zip
 rm -rf temp-nodejs-app
+rm -rf custom-build
 
 echo
 echo "🎉 CodeBuild Lab Cleanup Complete!"

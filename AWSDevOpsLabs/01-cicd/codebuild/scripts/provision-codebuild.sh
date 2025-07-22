@@ -88,6 +88,9 @@ EOF
 # Create buildspec.yml for the sample project
 cat > temp-nodejs-app/buildspec.yml << 'EOF'
 version: 0.2
+env:
+  variables:
+    NPM_CONFIG_CACHE: /tmp/.npm
 phases:
   install:
     runtime-versions:
@@ -96,7 +99,7 @@ phases:
     commands:
       - echo "Build started on $(date)"
       - echo "Installing dependencies..."
-      - npm install
+      - npm install --cache $NPM_CONFIG_CACHE
   build:
     commands:
       - echo "Build phase started on $(date)"
@@ -108,6 +111,10 @@ phases:
   post_build:
     commands:
       - echo "Build completed on $(date)"
+cache:
+  paths:
+    - '/tmp/.npm/**/*'
+    - 'node_modules/**/*'
 artifacts:
   files:
     - '**/*'
