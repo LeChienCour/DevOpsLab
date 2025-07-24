@@ -657,3 +657,432 @@ Key concepts to remember:
 - [AWS CodeDeploy Canary Deployments](https://docs.aws.amazon.com/codedeploy/latest/userguide/applications-create-lambda-canary.html)
 - [CloudWatch Alarms for Application Monitoring](https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/AlarmThatSendsEmail.html)
 - [Building a Continuous Delivery Pipeline for a Lambda Application with AWS CodePipeline](https://aws.amazon.com/blogs/devops/building-a-continuous-delivery-pipeline-for-a-lambda-application-with-aws-codepipeline/)
+## Lab Ap
+proaches
+
+This lab provides an automated CloudFormation approach for comprehensive canary deployment testing with advanced features.
+
+### Quick Start
+
+1. **Navigate to the lab directory:**
+   ```bash
+   cd AWSDevOpsLabs/05-deployment/canary
+   ```
+
+2. **Run the provisioning script:**
+   ```bash
+   ./scripts/provision-canary-lab.sh
+   ```
+
+3. **Follow the lab exercises below to test deployments**
+
+4. **Clean up when finished:**
+   ```bash
+   ./scripts/cleanup-canary-lab.sh
+   ```
+
+### What Gets Created
+
+The automated provisioning creates:
+
+#### Canary Deployment Infrastructure
+- **ECS Cluster**: Fargate-based cluster with production and canary services
+- **Application Load Balancer**: With weighted routing (90% production, 10% canary initially)
+- **Target Groups**: Separate health-checked target groups for each environment
+- **CloudWatch Monitoring**: Comprehensive dashboards and alarms for deployment health
+
+#### Automation and Orchestration
+- **Traffic Shifting Lambda**: Automated traffic distribution management
+- **Rollback Lambda**: Automated rollback execution based on alarm triggers
+- **Health Check Lambda**: Validates deployment health at each promotion stage
+- **Step Functions State Machine**: Orchestrates gradual canary promotion workflow
+
+#### A/B Testing and Feature Flags
+- **DynamoDB Tables**: Storage for feature flags and A/B test results
+- **Feature Flag API**: RESTful API for managing feature flags and user variants
+- **Analytics Lambda**: Real-time analysis of A/B test performance and statistical significance
+- **A/B Testing Dashboard**: CloudWatch dashboard for conversion and engagement metrics
+
+### Lab Exercises
+
+#### Exercise 1: Basic Canary Deployment
+
+1. **Test the initial deployment:**
+   ```bash
+   # Get the load balancer DNS from the script output
+   ALB_DNS="<ALB_DNS_NAME>"
+   
+   # Test traffic distribution (should be ~90% production, ~10% canary)
+   for i in {1..20}; do
+     curl -s http://$ALB_DNS | grep -o "Version: [0-9.]*" || echo "No version found"
+     sleep 0.5
+   done | sort | uniq -c
+   ```
+
+2. **Monitor target group health:**
+   ```bash
+   # Check both target groups are healthy
+   aws elbv2 describe-target-health --target-group-arn <PRODUCTION_TG_ARN>
+   aws elbv2 describe-target-health --target-group-arn <CANARY_TG_ARN>
+   ```
+
+3. **Use the traffic shifting helper script:**
+   ```bash
+   # Increase canary traffic by 10% (to 20% total)
+   ./traffic-shift.sh increase 10
+   
+   # Test the new distribution
+   for i in {1..20}; do
+     curl -s http://$ALB_DNS | grep -o "Version: [0-9.]*"
+     sleep 0.5
+   done | sort | uniq -c
+   
+   # Gradually increase canary traffic
+   ./traffic-shift.sh increase 15  # Now 35% canary
+   ./traffic-shift.sh increase 15  # Now 50% canary
+   ```
+
+#### Exercise 2: Automated Rollback Testing
+
+1. **Simulate a failing canary deployment:**
+   ```bash
+   # Create a task definition that will cause errors
+   aws ecs describe-task-definition \
+     --task-definition canary-demo-app-canary \
+     --query taskDefinition > failing-task-def.json
+   
+   # Modify the task definition to use a non-existent image or add failing health checks
+   # Then register the new failing task definition
+   aws ecs register-task-definition --cli-input-json file://failing-task-def.json
+   
+   # Update the canary service to use the failing task definition
+   aws ecs update-service \
+     --cluster canary-demo-app-cluster \
+     --service canary-demo-app-canary \
+     --task-definition canary-demo-app-canary:LATEST
+   ```
+
+2. **Increase canary traffic to trigger alarms:**
+   ```bash
+   # Increase canary traffic to 30% to trigger error rate alarms
+   ./traffic-shift.sh increase 20
+   
+   # Monitor the application for errors
+   for i in {1..30}; do
+     response=$(curl -s -o /dev/null -w "%{http_code}" http://$ALB_DNS)
+     echo "Response: $response"
+     sleep 2
+   done
+   ```
+
+3. **Monitor automated rollback:**
+   - Access the CloudWatch dashboard URL from the provisioning output
+   - Watch for alarm triggers on error rates and response times
+   - Observe the automated rollback function execution
+   - Verify traffic returns to 100% production
+
+4. **Check rollback logs:**
+   ```bash
+   # View rollback function logs
+   aws logs filter-log-events \
+     --log-group-name /aws/lambda/canary-demo-app-canary-rollback \
+     --start-time $(date -d '10 minutes ago' +%s)000 \
+     --query 'events[].message' \
+     --output text
+   ```
+
+#### Exercise 3: Feature Flags and A/B Testing
+
+1. **Set up feature flags:**
+   ```bash
+   # Get the Feature Flag API URL from the provisioning output
+   API_URL="<FEATURE_FLAG_API_URL>"
+   
+   # Create a feature flag for a new UI design
+   curl -X POST $API_URL/flags \
+     -H "Content-Type: application/json" \
+     -d '{
+       "action": "set_flag",
+       "flag_name": "new_ui_design",
+       "user_segment": "default",
+       "enabled": true,
+       "rollout_percentage": 25,
+       "variant": "B"
+     }'
+   
+   # Create a feature flag for the canary deployment
+   curl -X POST $API_URL/flags \
+     -H "Content-Type: application/json" \
+     -d '{
+       "action": "set_flag",
+       "flag_name": "canary_features",
+       "user_segment": "beta_users",
+       "enabled": true,
+       "rollout_percentage": 50,
+       "variant": "canary"
+     }'
+   ```
+
+2. **Test user variant assignment:**
+   ```bash
+   # Test variant assignment for different users
+   for user in user{1..10}; do
+     echo "User: $user"
+     curl -s -X GET "$API_URL/flags?flag_name=new_ui_design&user_id=$user" | jq -r '.body | fromjson | .variant'
+   done
+   
+   # Test with different user segments
+   curl -X GET "$API_URL/flags?flag_name=canary_features&user_id=beta_user_123&user_segment=beta_users" | jq '.'
+   ```
+
+3. **Simulate A/B test data collection:**
+   ```bash
+   # Record conversion events for A/B testing
+   for i in {1..100}; do
+     user_id="user_$i"
+     variant=$([ $((RANDOM % 4)) -eq 0 ] && echo "B" || echo "A")  # 25% get variant B
+     
+     # Simulate different conversion rates for each variant
+     if [ "$variant" = "B" ]; then
+       conversion_rate=35  # 35% conversion rate for variant B
+     else
+       conversion_rate=25  # 25% conversion rate for variant A
+     fi
+     
+     # Record page view
+     curl -s -X POST $API_URL/ab-test \
+       -H "Content-Type: application/json" \
+       -d "{
+         \"action\": \"record_event\",
+         \"test_id\": \"ui_redesign_test\",
+         \"user_id\": \"$user_id\",
+         \"variant\": \"$variant\",
+         \"event_type\": \"page_view\",
+         \"value\": 1
+       }" > /dev/null
+     
+     # Simulate conversion based on variant
+     if [ $((RANDOM % 100)) -lt $conversion_rate ]; then
+       curl -s -X POST $API_URL/ab-test \
+         -H "Content-Type: application/json" \
+         -d "{
+           \"action\": \"record_event\",
+           \"test_id\": \"ui_redesign_test\",
+           \"user_id\": \"$user_id\",
+           \"variant\": \"$variant\",
+           \"event_type\": \"conversion\",
+           \"value\": 1
+         }" > /dev/null
+     fi
+     
+     # Add some delay to simulate real user behavior
+     sleep 0.1
+   done
+   
+   echo "Generated 100 user sessions with A/B test data"
+   ```
+
+4. **Analyze A/B test results:**
+   ```bash
+   # Get aggregated test results
+   curl -X GET "$API_URL/ab-test?test_id=ui_redesign_test&hours_back=1" | jq '.'
+   
+   # Check statistical significance
+   curl -X POST $API_URL/ab-test \
+     -H "Content-Type: application/json" \
+     -d '{
+       "action": "analyze_significance",
+       "test_id": "ui_redesign_test",
+       "metric": "conversion"
+     }' | jq '.'
+   ```
+
+#### Exercise 4: Orchestrated Canary Promotion
+
+1. **Start automated promotion workflow:**
+   ```bash
+   # Get the Step Functions state machine ARN from the provisioning output
+   STATE_MACHINE_ARN="<STATE_MACHINE_ARN>"
+   
+   # Start the promotion workflow
+   EXECUTION_ARN=$(aws stepfunctions start-execution \
+     --state-machine-arn $STATE_MACHINE_ARN \
+     --name "canary-promotion-$(date +%s)" \
+     --input '{
+       "canary_version": "2.0.0",
+       "promotion_steps": [25, 50, 75, 100],
+       "wait_time_minutes": 2
+     }' \
+     --query 'executionArn' \
+     --output text)
+   
+   echo "Started promotion workflow: $EXECUTION_ARN"
+   ```
+
+2. **Monitor promotion progress:**
+   ```bash
+   # Watch execution status
+   while true; do
+     status=$(aws stepfunctions describe-execution \
+       --execution-arn $EXECUTION_ARN \
+       --query 'status' \
+       --output text)
+     
+     echo "$(date): Execution status: $status"
+     
+     if [ "$status" = "SUCCEEDED" ] || [ "$status" = "FAILED" ] || [ "$status" = "ABORTED" ]; then
+       break
+     fi
+     
+     sleep 30
+   done
+   
+   # Get final execution details
+   aws stepfunctions describe-execution --execution-arn $EXECUTION_ARN
+   ```
+
+3. **Monitor traffic distribution during promotion:**
+   ```bash
+   # Watch traffic distribution change over time
+   while true; do
+     echo "$(date): Current traffic distribution:"
+     for i in {1..10}; do
+       curl -s http://$ALB_DNS | grep -o "Version: [0-9.]*" 2>/dev/null || echo "Error"
+     done | sort | uniq -c
+     echo "---"
+     sleep 30
+   done
+   ```
+
+## Troubleshooting Guide
+
+### Common Issues and Solutions
+
+1. **Canary service shows unhealthy targets:**
+   - Check ECS service events: `aws ecs describe-services --cluster <cluster> --services <service>`
+   - Verify task definition is valid and image exists
+   - Check security group rules allow ALB to reach tasks
+   - Review CloudWatch logs for container errors
+
+2. **Traffic shifting not working:**
+   - Verify Lambda function has correct permissions
+   - Check ALB listener rules are properly configured
+   - Ensure target groups are healthy before shifting traffic
+   - Review Lambda function logs for errors
+
+3. **Alarms not triggering rollback:**
+   - Verify CloudWatch alarms are configured with correct thresholds
+   - Check SNS topic subscriptions are active
+   - Ensure Lambda functions have proper IAM permissions
+   - Test alarm triggers manually
+
+4. **Feature flags not working:**
+   - Check DynamoDB table permissions
+   - Verify API Gateway is properly configured
+   - Test Lambda functions individually
+   - Check for consistent hashing issues in user assignment
+
+### Debugging Commands
+
+```bash
+# Check ECS service status
+aws ecs describe-services --cluster canary-demo-app-cluster --services canary-demo-app-production canary-demo-app-canary
+
+# View ALB target group health
+aws elbv2 describe-target-health --target-group-arn <target-group-arn>
+
+# Check CloudWatch alarms
+aws cloudwatch describe-alarms --alarm-names canary-demo-app-Canary-HighErrorRate
+
+# View Lambda function logs
+aws logs filter-log-events --log-group-name /aws/lambda/canary-demo-app-traffic-shifting
+
+# Check Step Functions execution
+aws stepfunctions describe-execution --execution-arn <execution-arn>
+
+# Test feature flag API
+curl -X GET "<API_URL>/flags?flag_name=test&user_id=user123"
+```
+
+## Resources Created
+
+This lab creates the following AWS resources:
+
+### Compute and Networking
+- **ECS Cluster**: Fargate cluster for containerized applications
+- **ECS Services**: Production and canary services with different task definitions
+- **Application Load Balancer**: Internet-facing ALB with weighted routing
+- **Target Groups**: Separate target groups for production and canary traffic
+- **Security Groups**: ALB and ECS security groups with proper ingress rules
+
+### Monitoring and Automation
+- **CloudWatch Alarms**: Error rate, response time, and custom metric alarms
+- **CloudWatch Dashboard**: Real-time monitoring of canary deployment metrics
+- **Lambda Functions**: Traffic shifting, rollback, and health check automation
+- **Step Functions**: State machine for orchestrated canary promotion
+- **SNS Topics**: Notifications for rollback and promotion events
+
+### A/B Testing Infrastructure
+- **DynamoDB Tables**: Feature flags and A/B test results storage
+- **API Gateway**: RESTful API for feature flag management
+- **Lambda Functions**: Feature flag logic and analytics processing
+
+### Estimated Costs
+- Application Load Balancer: ~$0.54/day ($0.0225/hour)
+- ECS Fargate Tasks (4 tasks): ~$1.44/day ($0.06/day per task)
+- Lambda Functions: ~$0.01/day (minimal usage)
+- DynamoDB: ~$0.25/day (on-demand pricing)
+- CloudWatch: ~$0.30/day (custom metrics and alarms)
+- **Total estimated cost**: ~$2.54/day
+
+## Cleanup
+
+When you're finished with the lab, run the cleanup script:
+
+```bash
+./scripts/cleanup-canary-lab.sh
+```
+
+This will remove all created resources including:
+- CloudFormation stacks
+- DynamoDB tables
+- Step Functions state machines
+- Lambda functions
+- CloudWatch dashboards and alarms
+- Local helper scripts
+
+> **Important**: Failure to clean up resources may result in unexpected charges to your AWS account.
+
+## Next Steps
+
+After completing this lab, consider:
+
+1. **Implement blue-green deployments** for instant traffic switching
+2. **Add custom business metrics** for more sophisticated rollback triggers
+3. **Integrate with CI/CD pipelines** for automated canary deployments
+4. **Explore advanced A/B testing** with statistical significance calculations
+5. **Add multi-region canary deployments** for global applications
+
+## Certification Exam Tips
+
+This lab covers several key areas for the AWS DevOps Professional exam:
+
+- **Domain 2**: Configuration Management and Infrastructure as Code (Canary deployment patterns)
+- **Domain 3**: Monitoring and Logging (Application monitoring and automated responses)
+- **Domain 4**: Policies and Standards Automation (Automated deployment strategies)
+- **Domain 5**: Incident and Event Response (Automated rollback and monitoring)
+
+Key concepts to remember:
+- Canary deployments reduce risk by gradually shifting traffic to new versions
+- Automated monitoring and rollback are essential for production deployments
+- Feature flags enable controlled rollouts and A/B testing
+- CloudWatch alarms can trigger automated responses to deployment issues
+- Step Functions provide orchestration for complex deployment workflows
+
+## Additional Resources
+
+- [AWS Application Load Balancer Weighted Routing](https://docs.aws.amazon.com/elasticloadbalancing/latest/application/load-balancer-target-groups.html#target-group-routing-algorithm)
+- [Canary Deployments with AWS App Mesh](https://docs.aws.amazon.com/app-mesh/latest/userguide/canary-deployments.html)
+- [AWS Step Functions for Deployment Automation](https://docs.aws.amazon.com/step-functions/latest/dg/welcome.html)
+- [Feature Flags Best Practices](https://docs.aws.amazon.com/wellarchitected/latest/operational-excellence-pillar/ops_dev_integ_version_control.html)
+- [A/B Testing with AWS](https://aws.amazon.com/blogs/architecture/a-b-testing-ml-models-in-production-using-amazon-sagemaker/)

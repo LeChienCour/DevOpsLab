@@ -1,0 +1,321 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'CloudWatch Alarms and Automated Rollback for Blue-Green Deployments'
+
+Parameters:
+  ApplicationName:
+    Type: String
+    Description: Name of the application being monitored
+    Default: "blue-green-demo"
+  
+  LoadBalancerFullName:
+    Type: String
+    Description: Full name of the Application Load Balancer
+  
+  TargetGroupFullName:
+    Type: String
+    Description: Full name of the Target Group
+  
+  SNSTopicArn:
+    Type: String
+    Description: SNS Topic ARN for notifications
+    Default: ""
+
+Conditions:
+  HasSNSTopic: !Not [!Equals [!Ref SNSTopicArn, ""]]
+
+Resources:
+  # CloudWatch Dashboard
+  DeploymentDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub "${ApplicationName}-BlueGreen-Dashboard"
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "metric",
+              "x": 0,
+              "y": 0,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  [ "AWS/ApplicationELB", "RequestCount", "LoadBalancer", "${LoadBalancerFullName}" ],
+                  [ ".", "TargetResponseTime", ".", "." ],
+                  [ ".", "HTTPCode_Target_2XX_Count", ".", "." ],
+                  [ ".", "HTTPCode_Target_4XX_Count", ".", "." ],
+                  [ ".", "HTTPCode_Target_5XX_Count", ".", "." ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "Load Balancer Metrics",
+                "period": 300
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12,
+              "y": 0,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  [ "AWS/ApplicationELB", "HealthyHostCount", "TargetGroup", "${TargetGroupFullName}" ],
+                  [ ".", "UnHealthyHostCount", ".", "." ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "Target Group Health",
+                "period": 300
+              }
+            }
+          ]
+        }
+
+  # High Error Rate Alarm
+  HighErrorRateAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${ApplicationName}-HighErrorRate"
+      AlarmDescription: "Triggers when error rate exceeds threshold during deployment"
+      MetricName: HTTPCode_Target_5XX_Count
+      Namespace: AWS/ApplicationELB
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 2
+      Threshold: 10
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: LoadBalancer
+          Value: !Ref LoadBalancerFullName
+      AlarmActions:
+        - !Ref RollbackTopic
+        - !If [HasSNSTopic, !Ref SNSTopicArn, !Ref "AWS::NoValue"]
+      TreatMissingData: notBreaching
+
+  # High Response Time Alarm
+  HighResponseTimeAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${ApplicationName}-HighResponseTime"
+      AlarmDescription: "Triggers when response time exceeds threshold"
+      MetricName: TargetResponseTime
+      Namespace: AWS/ApplicationELB
+      Statistic: Average
+      Period: 60
+      EvaluationPeriods: 3
+      Threshold: 2.0
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: LoadBalancer
+          Value: !Ref LoadBalancerFullName
+      AlarmActions:
+        - !Ref RollbackTopic
+        - !If [HasSNSTopic, !Ref SNSTopicArn, !Ref "AWS::NoValue"]
+      TreatMissingData: notBreaching
+
+  # Low Healthy Host Count Alarm
+  LowHealthyHostAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${ApplicationName}-LowHealthyHosts"
+      AlarmDescription: "Triggers when healthy host count drops below threshold"
+      MetricName: HealthyHostCount
+      Namespace: AWS/ApplicationELB
+      Statistic: Average
+      Period: 60
+      EvaluationPeriods: 2
+      Threshold: 1
+      ComparisonOperator: LessThanThreshold
+      Dimensions:
+        - Name: TargetGroup
+          Value: !Ref TargetGroupFullName
+      AlarmActions:
+        - !Ref RollbackTopic
+        - !If [HasSNSTopic, !Ref SNSTopicArn, !Ref "AWS::NoValue"]
+      TreatMissingData: breaching
+
+  # Custom Business Metric Alarm
+  BusinessMetricAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${ApplicationName}-BusinessMetric"
+      AlarmDescription: "Custom business metric for deployment validation"
+      MetricName: SuccessfulTransactions
+      Namespace: !Sub "${ApplicationName}/Business"
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 50
+      ComparisonOperator: LessThanThreshold
+      AlarmActions:
+        - !Ref RollbackTopic
+        - !If [HasSNSTopic, !Ref SNSTopicArn, !Ref "AWS::NoValue"]
+      TreatMissingData: notBreaching
+
+  # SNS Topic for Rollback Notifications
+  RollbackTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub "${ApplicationName}-rollback-notifications"
+      DisplayName: "Blue-Green Deployment Rollback Notifications"
+
+  # Lambda Function for Automated Rollback
+  RollbackFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${ApplicationName}-rollback-function"
+      Runtime: python3.9
+      Handler: index.handler
+      Role: !GetAtt RollbackFunctionRole.Arn
+      Timeout: 300
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+          
+          codedeploy = boto3.client('codedeploy')
+          
+          def handler(event, context):
+              print(f"Received event: {json.dumps(event)}")
+              
+              # Parse SNS message
+              for record in event['Records']:
+                  if record['EventSource'] == 'aws:sns':
+                      message = json.loads(record['Sns']['Message'])
+                      alarm_name = message['AlarmName']
+                      new_state = message['NewStateValue']
+                      
+                      if new_state == 'ALARM':
+                          print(f"Alarm {alarm_name} triggered, initiating rollback")
+                          
+                          # Get deployment ID from environment or CloudWatch logs
+                          application_name = os.environ.get('APPLICATION_NAME')
+                          deployment_group = os.environ.get('DEPLOYMENT_GROUP')
+                          
+                          if application_name and deployment_group:
+                              try:
+                                  # List recent deployments
+                                  response = codedeploy.list_deployments(
+                                      applicationName=application_name,
+                                      deploymentGroupName=deployment_group,
+                                      includeOnlyStatuses=['InProgress']
+                                  )
+                                  
+                                  # Stop the current deployment
+                                  for deployment_id in response['deployments']:
+                                      print(f"Stopping deployment: {deployment_id}")
+                                      codedeploy.stop_deployment(
+                                          deploymentId=deployment_id,
+                                          autoRollbackEnabled=True
+                                      )
+                                      
+                              except Exception as e:
+                                  print(f"Error during rollback: {str(e)}")
+                                  
+              return {
+                  'statusCode': 200,
+                  'body': json.dumps('Rollback processing completed')
+              }
+      Environment:
+        Variables:
+          APPLICATION_NAME: !Sub "${ApplicationName}-codedeploy-app"
+          DEPLOYMENT_GROUP: !Sub "${ApplicationName}-deployment-group"
+
+  # IAM Role for Rollback Function
+  RollbackFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: CodeDeployRollbackPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - codedeploy:ListDeployments
+                  - codedeploy:StopDeployment
+                  - codedeploy:GetDeployment
+                  - codedeploy:GetApplication
+                  - codedeploy:GetDeploymentGroup
+                Resource: "*"
+
+  # SNS Subscription for Rollback Function
+  RollbackSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref RollbackTopic
+      Protocol: lambda
+      Endpoint: !GetAtt RollbackFunction.Arn
+
+  # Lambda Permission for SNS
+  RollbackFunctionPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref RollbackFunction
+      Action: lambda:InvokeFunction
+      Principal: sns.amazonaws.com
+      SourceArn: !Ref RollbackTopic
+
+  # CloudWatch Log Group for Rollback Function
+  RollbackLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${ApplicationName}-rollback-function"
+      RetentionInDays: 7
+
+  # Composite Alarm for Overall Health
+  OverallHealthAlarm:
+    Type: AWS::CloudWatch::CompositeAlarm
+    Properties:
+      AlarmName: !Sub "${ApplicationName}-OverallHealth"
+      AlarmDescription: "Composite alarm for overall application health"
+      AlarmRule: !Sub |
+        ALARM(${HighErrorRateAlarm}) OR 
+        ALARM(${HighResponseTimeAlarm}) OR 
+        ALARM(${LowHealthyHostAlarm})
+      ActionsEnabled: true
+      AlarmActions:
+        - !Ref RollbackTopic
+        - !If [HasSNSTopic, !Ref SNSTopicArn, !Ref "AWS::NoValue"]
+
+Outputs:
+  DashboardURL:
+    Description: CloudWatch Dashboard URL
+    Value: !Sub "https://${AWS::Region}.console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#dashboards:name=${ApplicationName}-BlueGreen-Dashboard"
+  
+  RollbackTopicArn:
+    Description: SNS Topic ARN for rollback notifications
+    Value: !Ref RollbackTopic
+    Export:
+      Name: !Sub "${AWS::StackName}-RollbackTopicArn"
+  
+  RollbackFunctionArn:
+    Description: Lambda function ARN for automated rollback
+    Value: !GetAtt RollbackFunction.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-RollbackFunctionArn"
+  
+  HighErrorRateAlarmArn:
+    Description: High error rate alarm ARN
+    Value: !GetAtt HighErrorRateAlarm.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-HighErrorRateAlarmArn"
+  
+  OverallHealthAlarmArn:
+    Description: Overall health composite alarm ARN
+    Value: !GetAtt OverallHealthAlarm.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-OverallHealthAlarmArn"

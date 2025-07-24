@@ -1,0 +1,424 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Application Load Balancer Canary Deployment with Gradual Traffic Shifting'
+
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC ID for the deployment
+  
+  SubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Subnet IDs for the load balancer and instances
+  
+  ApplicationName:
+    Type: String
+    Description: Name of the application
+    Default: "canary-demo-app"
+  
+  ProductionImageUri:
+    Type: String
+    Description: Container image URI for production version
+    Default: "nginx:1.20"
+  
+  CanaryImageUri:
+    Type: String
+    Description: Container image URI for canary version
+    Default: "nginx:1.21"
+
+Resources:
+  # ECS Cluster
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Sub "${ApplicationName}-cluster"
+      CapacityProviders:
+        - FARGATE
+      DefaultCapacityProviderStrategy:
+        - CapacityProvider: FARGATE
+          Weight: 1
+
+  # Application Load Balancer
+  ApplicationLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub "${ApplicationName}-alb"
+      Scheme: internet-facing
+      Type: application
+      Subnets: !Ref SubnetIds
+      SecurityGroups:
+        - !Ref ALBSecurityGroup
+
+  # ALB Security Group
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for ALB
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+
+  # Production Target Group
+  ProductionTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub "${ApplicationName}-prod-tg"
+      Port: 80
+      Protocol: HTTP
+      VpcId: !Ref VpcId
+      TargetType: ip
+      HealthCheckPath: /health
+      HealthCheckProtocol: HTTP
+      HealthCheckIntervalSeconds: 30
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: "30"
+
+  # Canary Target Group
+  CanaryTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub "${ApplicationName}-canary-tg"
+      Port: 80
+      Protocol: HTTP
+      VpcId: !Ref VpcId
+      TargetType: ip
+      HealthCheckPath: /health
+      HealthCheckProtocol: HTTP
+      HealthCheckIntervalSeconds: 30
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: "30"
+
+  # ALB Listener with weighted routing
+  ProductionListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          ForwardConfig:
+            TargetGroups:
+              - TargetGroupArn: !Ref ProductionTargetGroup
+                Weight: 90
+              - TargetGroupArn: !Ref CanaryTargetGroup
+                Weight: 10
+
+  # Production Task Definition
+  ProductionTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub "${ApplicationName}-production"
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      Cpu: 256
+      Memory: 512
+      ExecutionRoleArn: !Ref TaskExecutionRole
+      ContainerDefinitions:
+        - Name: !Sub "${ApplicationName}-production-container"
+          Image: !Ref ProductionImageUri
+          PortMappings:
+            - ContainerPort: 80
+              Protocol: tcp
+          Environment:
+            - Name: VERSION
+              Value: "1.0.0"
+            - Name: ENVIRONMENT
+              Value: "production"
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref ProductionLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: ecs
+
+  # Canary Task Definition
+  CanaryTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub "${ApplicationName}-canary"
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      Cpu: 256
+      Memory: 512
+      ExecutionRoleArn: !Ref TaskExecutionRole
+      ContainerDefinitions:
+        - Name: !Sub "${ApplicationName}-canary-container"
+          Image: !Ref CanaryImageUri
+          PortMappings:
+            - ContainerPort: 80
+              Protocol: tcp
+          Environment:
+            - Name: VERSION
+              Value: "2.0.0"
+            - Name: ENVIRONMENT
+              Value: "canary"
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref CanaryLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: ecs
+
+  # Production ECS Service
+  ProductionService:
+    Type: AWS::ECS::Service
+    DependsOn: ProductionListener
+    Properties:
+      ServiceName: !Sub "${ApplicationName}-production"
+      Cluster: !Ref ECSCluster
+      TaskDefinition: !Ref ProductionTaskDefinition
+      DesiredCount: 3
+      LaunchType: FARGATE
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          SecurityGroups:
+            - !Ref ECSSecurityGroup
+          Subnets: !Ref SubnetIds
+          AssignPublicIp: ENABLED
+      LoadBalancers:
+        - ContainerName: !Sub "${ApplicationName}-production-container"
+          ContainerPort: 80
+          TargetGroupArn: !Ref ProductionTargetGroup
+      DeploymentConfiguration:
+        MaximumPercent: 200
+        MinimumHealthyPercent: 100
+
+  # Canary ECS Service
+  CanaryService:
+    Type: AWS::ECS::Service
+    DependsOn: ProductionListener
+    Properties:
+      ServiceName: !Sub "${ApplicationName}-canary"
+      Cluster: !Ref ECSCluster
+      TaskDefinition: !Ref CanaryTaskDefinition
+      DesiredCount: 1
+      LaunchType: FARGATE
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          SecurityGroups:
+            - !Ref ECSSecurityGroup
+          Subnets: !Ref SubnetIds
+          AssignPublicIp: ENABLED
+      LoadBalancers:
+        - ContainerName: !Sub "${ApplicationName}-canary-container"
+          ContainerPort: 80
+          TargetGroupArn: !Ref CanaryTargetGroup
+      DeploymentConfiguration:
+        MaximumPercent: 200
+        MinimumHealthyPercent: 100
+
+  # ECS Security Group
+  ECSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for ECS tasks
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          SourceSecurityGroupId: !Ref ALBSecurityGroup
+
+  # Task Execution Role
+  TaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+
+  # CloudWatch Log Groups
+  ProductionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/ecs/${ApplicationName}-production"
+      RetentionInDays: 7
+
+  CanaryLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/ecs/${ApplicationName}-canary"
+      RetentionInDays: 7
+
+  # Lambda function for traffic shifting automation
+  TrafficShiftingFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${ApplicationName}-traffic-shifting"
+      Runtime: python3.9
+      Handler: index.handler
+      Role: !GetAtt TrafficShiftingRole.Arn
+      Timeout: 300
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+          
+          elbv2 = boto3.client('elbv2')
+          cloudwatch = boto3.client('cloudwatch')
+          
+          def handler(event, context):
+              listener_arn = os.environ['LISTENER_ARN']
+              prod_tg_arn = os.environ['PROD_TG_ARN']
+              canary_tg_arn = os.environ['CANARY_TG_ARN']
+              
+              # Get current traffic weights
+              response = elbv2.describe_listeners(ListenerArns=[listener_arn])
+              current_actions = response['Listeners'][0]['DefaultActions'][0]['ForwardConfig']['TargetGroups']
+              
+              # Find current weights
+              prod_weight = 100
+              canary_weight = 0
+              
+              for tg in current_actions:
+                  if tg['TargetGroupArn'] == prod_tg_arn:
+                      prod_weight = tg['Weight']
+                  elif tg['TargetGroupArn'] == canary_tg_arn:
+                      canary_weight = tg['Weight']
+              
+              # Determine action based on event
+              action = event.get('action', 'increase')
+              step = event.get('step', 10)
+              
+              if action == 'increase' and canary_weight < 100:
+                  new_canary_weight = min(canary_weight + step, 100)
+                  new_prod_weight = 100 - new_canary_weight
+              elif action == 'decrease' and canary_weight > 0:
+                  new_canary_weight = max(canary_weight - step, 0)
+                  new_prod_weight = 100 - new_canary_weight
+              elif action == 'rollback':
+                  new_canary_weight = 0
+                  new_prod_weight = 100
+              elif action == 'promote':
+                  new_canary_weight = 100
+                  new_prod_weight = 0
+              else:
+                  return {
+                      'statusCode': 200,
+                      'body': json.dumps(f'No change needed. Current: Prod={prod_weight}%, Canary={canary_weight}%')
+                  }
+              
+              # Update listener
+              elbv2.modify_listener(
+                  ListenerArn=listener_arn,
+                  DefaultActions=[
+                      {
+                          'Type': 'forward',
+                          'ForwardConfig': {
+                              'TargetGroups': [
+                                  {
+                                      'TargetGroupArn': prod_tg_arn,
+                                      'Weight': new_prod_weight
+                                  },
+                                  {
+                                      'TargetGroupArn': canary_tg_arn,
+                                      'Weight': new_canary_weight
+                                  }
+                              ]
+                          }
+                      }
+                  ]
+              )
+              
+              # Put custom metric
+              cloudwatch.put_metric_data(
+                  Namespace=f'{os.environ["APPLICATION_NAME"]}/Canary',
+                  MetricData=[
+                      {
+                          'MetricName': 'CanaryTrafficPercentage',
+                          'Value': new_canary_weight,
+                          'Unit': 'Percent'
+                      }
+                  ]
+              )
+              
+              return {
+                  'statusCode': 200,
+                  'body': json.dumps(f'Traffic updated: Prod={new_prod_weight}%, Canary={new_canary_weight}%')
+              }
+      Environment:
+        Variables:
+          LISTENER_ARN: !Ref ProductionListener
+          PROD_TG_ARN: !Ref ProductionTargetGroup
+          CANARY_TG_ARN: !Ref CanaryTargetGroup
+          APPLICATION_NAME: !Ref ApplicationName
+
+  # IAM Role for Traffic Shifting Function
+  TrafficShiftingRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: TrafficShiftingPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - elasticloadbalancing:DescribeListeners
+                  - elasticloadbalancing:ModifyListener
+                  - cloudwatch:PutMetricData
+                Resource: "*"
+
+Outputs:
+  LoadBalancerDNS:
+    Description: DNS name of the load balancer
+    Value: !GetAtt ApplicationLoadBalancer.DNSName
+    Export:
+      Name: !Sub "${AWS::StackName}-LoadBalancerDNS"
+  
+  ApplicationURL:
+    Description: Application URL
+    Value: !Sub "http://${ApplicationLoadBalancer.DNSName}"
+    Export:
+      Name: !Sub "${AWS::StackName}-ApplicationURL"
+  
+  ProductionTargetGroupArn:
+    Description: Production target group ARN
+    Value: !Ref ProductionTargetGroup
+    Export:
+      Name: !Sub "${AWS::StackName}-ProductionTargetGroupArn"
+  
+  CanaryTargetGroupArn:
+    Description: Canary target group ARN
+    Value: !Ref CanaryTargetGroup
+    Export:
+      Name: !Sub "${AWS::StackName}-CanaryTargetGroupArn"
+  
+  TrafficShiftingFunctionArn:
+    Description: Traffic shifting Lambda function ARN
+    Value: !GetAtt TrafficShiftingFunction.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-TrafficShiftingFunctionArn"
+  
+  ECSCluster:
+    Description: ECS cluster name
+    Value: !Ref ECSCluster
+    Export:
+      Name: !Sub "${AWS::StackName}-ECSCluster"

@@ -1,0 +1,281 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Lambda Blue-Green Deployment with Aliases and CodeDeploy'
+
+Parameters:
+  FunctionName:
+    Type: String
+    Description: Name of the Lambda function
+    Default: "blue-green-lambda-demo"
+  
+  S3Bucket:
+    Type: String
+    Description: S3 bucket containing the Lambda deployment package
+  
+  S3Key:
+    Type: String
+    Description: S3 key for the Lambda deployment package
+    Default: "lambda-function.zip"
+
+Resources:
+  # Lambda Function
+  LambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Ref FunctionName
+      Runtime: python3.9
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        S3Bucket: !Ref S3Bucket
+        S3Key: !Ref S3Key
+      Environment:
+        Variables:
+          VERSION: "1.0.0"
+          ENVIRONMENT: "production"
+      Timeout: 30
+      MemorySize: 128
+
+  # Lambda Execution Role
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: CloudWatchMetricsPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - cloudwatch:PutMetricData
+                Resource: "*"
+
+  # Lambda Version (Blue)
+  LambdaVersion:
+    Type: AWS::Lambda::Version
+    Properties:
+      FunctionName: !Ref LambdaFunction
+      Description: "Initial version for blue-green deployment"
+
+  # Production Alias (Blue)
+  ProductionAlias:
+    Type: AWS::Lambda::Alias
+    Properties:
+      FunctionName: !Ref LambdaFunction
+      FunctionVersion: !GetAtt LambdaVersion.Version
+      Name: "PROD"
+      Description: "Production alias for blue-green deployment"
+
+  # Staging Alias (Green)
+  StagingAlias:
+    Type: AWS::Lambda::Alias
+    Properties:
+      FunctionName: !Ref LambdaFunction
+      FunctionVersion: !GetAtt LambdaVersion.Version
+      Name: "STAGING"
+      Description: "Staging alias for blue-green deployment"
+
+  # API Gateway for testing
+  ApiGateway:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: !Sub "${FunctionName}-api"
+      Description: "API Gateway for Lambda blue-green deployment testing"
+      EndpointConfiguration:
+        Types:
+          - REGIONAL
+
+  # API Gateway Resource
+  ApiResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ParentId: !GetAtt ApiGateway.RootResourceId
+      PathPart: "invoke"
+
+  # API Gateway Method for Production
+  ApiMethodProd:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ResourceId: !Ref ApiResource
+      HttpMethod: GET
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${LambdaFunction}:PROD/invocations"
+
+  # API Gateway Method for Staging
+  ApiMethodStaging:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ResourceId: !Ref ApiResource
+      HttpMethod: POST
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${LambdaFunction}:STAGING/invocations"
+
+  # API Gateway Deployment
+  ApiDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn:
+      - ApiMethodProd
+      - ApiMethodStaging
+    Properties:
+      RestApiId: !Ref ApiGateway
+      StageName: "v1"
+
+  # Lambda Permissions for API Gateway
+  LambdaPermissionProd:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Sub "${LambdaFunction}:PROD"
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGateway}/*/*"
+
+  LambdaPermissionStaging:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Sub "${LambdaFunction}:STAGING"
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGateway}/*/*"
+
+  # CodeDeploy Application for Lambda
+  CodeDeployApplication:
+    Type: AWS::CodeDeploy::Application
+    Properties:
+      ApplicationName: !Sub "${FunctionName}-codedeploy-app"
+      ComputePlatform: Lambda
+
+  # CodeDeploy Deployment Group
+  CodeDeployDeploymentGroup:
+    Type: AWS::CodeDeploy::DeploymentGroup
+    Properties:
+      ApplicationName: !Ref CodeDeployApplication
+      DeploymentGroupName: !Sub "${FunctionName}-deployment-group"
+      ServiceRoleArn: !GetAtt CodeDeployServiceRole.Arn
+      DeploymentConfigName: CodeDeployDefault.LambdaLinear10PercentEvery1Minute
+      AutoRollbackConfiguration:
+        Enabled: true
+        Events:
+          - DEPLOYMENT_FAILURE
+          - DEPLOYMENT_STOP_ON_ALARM
+          - DEPLOYMENT_STOP_ON_INSTANCE_FAILURE
+      AlarmConfiguration:
+        Enabled: true
+        Alarms:
+          - Name: !Ref ErrorRateAlarm
+          - Name: !Ref DurationAlarm
+
+  # CodeDeploy Service Role
+  CodeDeployServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codedeploy.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSCodeDeployRoleForLambda
+
+  # CloudWatch Alarms for Rollback
+  ErrorRateAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${FunctionName}-ErrorRate"
+      AlarmDescription: "Lambda function error rate alarm"
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 2
+      Threshold: 2
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref LambdaFunction
+        - Name: Resource
+          Value: !Sub "${LambdaFunction}:PROD"
+      TreatMissingData: notBreaching
+
+  DurationAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${FunctionName}-Duration"
+      AlarmDescription: "Lambda function duration alarm"
+      MetricName: Duration
+      Namespace: AWS/Lambda
+      Statistic: Average
+      Period: 60
+      EvaluationPeriods: 2
+      Threshold: 10000
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref LambdaFunction
+        - Name: Resource
+          Value: !Sub "${LambdaFunction}:PROD"
+      TreatMissingData: notBreaching
+
+  # Custom CloudWatch Alarm for Business Metrics
+  CustomMetricAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${FunctionName}-CustomMetric"
+      AlarmDescription: "Custom business metric alarm for rollback"
+      MetricName: BusinessMetric
+      Namespace: !Sub "${FunctionName}/Custom"
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 100
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: notBreaching
+
+Outputs:
+  LambdaFunctionArn:
+    Description: ARN of the Lambda function
+    Value: !GetAtt LambdaFunction.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-LambdaFunctionArn"
+  
+  ProductionAliasArn:
+    Description: ARN of the production alias
+    Value: !Ref ProductionAlias
+    Export:
+      Name: !Sub "${AWS::StackName}-ProductionAliasArn"
+  
+  StagingAliasArn:
+    Description: ARN of the staging alias
+    Value: !Ref StagingAlias
+    Export:
+      Name: !Sub "${AWS::StackName}-StagingAliasArn"
+  
+  ApiGatewayUrl:
+    Description: API Gateway URL for testing
+    Value: !Sub "https://${ApiGateway}.execute-api.${AWS::Region}.amazonaws.com/v1/invoke"
+    Export:
+      Name: !Sub "${AWS::StackName}-ApiGatewayUrl"
+  
+  CodeDeployApplication:
+    Description: CodeDeploy application name
+    Value: !Ref CodeDeployApplication
+    Export:
+      Name: !Sub "${AWS::StackName}-CodeDeployApplication"

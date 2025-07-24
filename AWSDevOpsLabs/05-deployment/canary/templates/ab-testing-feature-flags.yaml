@@ -1,0 +1,639 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'A/B Testing with Feature Flags for Canary Deployments'
+
+Parameters:
+  ApplicationName:
+    Type: String
+    Description: Name of the application
+    Default: "ab-testing-demo"
+  
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC ID for the deployment
+  
+  SubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Subnet IDs for the deployment
+
+Resources:
+  # DynamoDB Table for Feature Flags
+  FeatureFlagsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${ApplicationName}-feature-flags"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: flag_name
+          AttributeType: S
+        - AttributeName: user_segment
+          AttributeType: S
+      KeySchema:
+        - AttributeName: flag_name
+          KeyType: HASH
+        - AttributeName: user_segment
+          KeyType: RANGE
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+
+  # DynamoDB Table for A/B Test Results
+  ABTestResultsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${ApplicationName}-ab-test-results"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: test_id
+          AttributeType: S
+        - AttributeName: timestamp
+          AttributeType: N
+      KeySchema:
+        - AttributeName: test_id
+          KeyType: HASH
+        - AttributeName: timestamp
+          KeyType: RANGE
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+
+  # Lambda Function for Feature Flag Management
+  FeatureFlagFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${ApplicationName}-feature-flags"
+      Runtime: python3.9
+      Handler: index.handler
+      Role: !GetAtt FeatureFlagRole.Arn
+      Timeout: 30
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import hashlib
+          import time
+          from decimal import Decimal
+          
+          dynamodb = boto3.resource('dynamodb')
+          table = dynamodb.Table(os.environ['FEATURE_FLAGS_TABLE'])
+          
+          def handler(event, context):
+              action = event.get('action')
+              
+              if action == 'get_flag':
+                  return get_feature_flag(event)
+              elif action == 'set_flag':
+                  return set_feature_flag(event)
+              elif action == 'get_user_variant':
+                  return get_user_variant(event)
+              else:
+                  return {
+                      'statusCode': 400,
+                      'body': json.dumps('Invalid action')
+                  }
+          
+          def get_feature_flag(event):
+              flag_name = event['flag_name']
+              user_segment = event.get('user_segment', 'default')
+              
+              try:
+                  response = table.get_item(
+                      Key={
+                          'flag_name': flag_name,
+                          'user_segment': user_segment
+                      }
+                  )
+                  
+                  if 'Item' in response:
+                      return {
+                          'statusCode': 200,
+                          'body': json.dumps(response['Item'], default=str)
+                      }
+                  else:
+                      return {
+                          'statusCode': 404,
+                          'body': json.dumps('Feature flag not found')
+                      }
+              except Exception as e:
+                  return {
+                      'statusCode': 500,
+                      'body': json.dumps(f'Error: {str(e)}')
+                  }
+          
+          def set_feature_flag(event):
+              flag_name = event['flag_name']
+              user_segment = event.get('user_segment', 'default')
+              enabled = event['enabled']
+              rollout_percentage = event.get('rollout_percentage', 100)
+              variant = event.get('variant', 'A')
+              
+              try:
+                  table.put_item(
+                      Item={
+                          'flag_name': flag_name,
+                          'user_segment': user_segment,
+                          'enabled': enabled,
+                          'rollout_percentage': Decimal(str(rollout_percentage)),
+                          'variant': variant,
+                          'created_at': int(time.time()),
+                          'ttl': int(time.time()) + (30 * 24 * 60 * 60)  # 30 days TTL
+                      }
+                  )
+                  
+                  return {
+                      'statusCode': 200,
+                      'body': json.dumps('Feature flag updated successfully')
+                  }
+              except Exception as e:
+                  return {
+                      'statusCode': 500,
+                      'body': json.dumps(f'Error: {str(e)}')
+                  }
+          
+          def get_user_variant(event):
+              user_id = event['user_id']
+              flag_name = event['flag_name']
+              user_segment = event.get('user_segment', 'default')
+              
+              try:
+                  # Get feature flag configuration
+                  response = table.get_item(
+                      Key={
+                          'flag_name': flag_name,
+                          'user_segment': user_segment
+                      }
+                  )
+                  
+                  if 'Item' not in response:
+                      return {
+                          'statusCode': 404,
+                          'body': json.dumps('Feature flag not found')
+                      }
+                  
+                  flag = response['Item']
+                  
+                  if not flag['enabled']:
+                      return {
+                          'statusCode': 200,
+                          'body': json.dumps({
+                              'variant': 'control',
+                              'enabled': False
+                          })
+                      }
+                  
+                  # Determine user variant based on consistent hashing
+                  hash_input = f"{user_id}:{flag_name}"
+                  hash_value = int(hashlib.md5(hash_input.encode()).hexdigest(), 16)
+                  user_percentage = (hash_value % 100) + 1
+                  
+                  if user_percentage <= float(flag['rollout_percentage']):
+                      variant = flag['variant']
+                  else:
+                      variant = 'control'
+                  
+                  return {
+                      'statusCode': 200,
+                      'body': json.dumps({
+                          'variant': variant,
+                          'enabled': True,
+                          'user_percentage': user_percentage,
+                          'rollout_percentage': float(flag['rollout_percentage'])
+                      })
+                  }
+                  
+              except Exception as e:
+                  return {
+                      'statusCode': 500,
+                      'body': json.dumps(f'Error: {str(e)}')
+                  }
+      Environment:
+        Variables:
+          FEATURE_FLAGS_TABLE: !Ref FeatureFlagsTable
+
+  # Lambda Function for A/B Test Analytics
+  ABTestAnalyticsFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${ApplicationName}-ab-analytics"
+      Runtime: python3.9
+      Handler: index.handler
+      Role: !GetAtt FeatureFlagRole.Arn
+      Timeout: 60
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import time
+          from decimal import Decimal
+          from boto3.dynamodb.conditions import Key
+          
+          dynamodb = boto3.resource('dynamodb')
+          results_table = dynamodb.Table(os.environ['AB_RESULTS_TABLE'])
+          cloudwatch = boto3.client('cloudwatch')
+          
+          def handler(event, context):
+              action = event.get('action')
+              
+              if action == 'record_event':
+                  return record_ab_event(event)
+              elif action == 'get_results':
+                  return get_ab_results(event)
+              elif action == 'analyze_significance':
+                  return analyze_statistical_significance(event)
+              else:
+                  return {
+                      'statusCode': 400,
+                      'body': json.dumps('Invalid action')
+                  }
+          
+          def record_ab_event(event):
+              test_id = event['test_id']
+              user_id = event['user_id']
+              variant = event['variant']
+              event_type = event['event_type']  # 'conversion', 'click', 'view', etc.
+              value = event.get('value', 1)
+              
+              try:
+                  timestamp = int(time.time() * 1000)  # milliseconds
+                  
+                  results_table.put_item(
+                      Item={
+                          'test_id': test_id,
+                          'timestamp': timestamp,
+                          'user_id': user_id,
+                          'variant': variant,
+                          'event_type': event_type,
+                          'value': Decimal(str(value))
+                      }
+                  )
+                  
+                  # Send custom metric to CloudWatch
+                  cloudwatch.put_metric_data(
+                      Namespace=f'{os.environ["APPLICATION_NAME"]}/ABTesting',
+                      MetricData=[
+                          {
+                              'MetricName': f'{event_type}_count',
+                              'Dimensions': [
+                                  {
+                                      'Name': 'TestId',
+                                      'Value': test_id
+                                  },
+                                  {
+                                      'Name': 'Variant',
+                                      'Value': variant
+                                  }
+                              ],
+                              'Value': float(value),
+                              'Unit': 'Count'
+                          }
+                      ]
+                  )
+                  
+                  return {
+                      'statusCode': 200,
+                      'body': json.dumps('Event recorded successfully')
+                  }
+                  
+              except Exception as e:
+                  return {
+                      'statusCode': 500,
+                      'body': json.dumps(f'Error: {str(e)}')
+                  }
+          
+          def get_ab_results(event):
+              test_id = event['test_id']
+              hours_back = event.get('hours_back', 24)
+              
+              try:
+                  start_time = int((time.time() - (hours_back * 3600)) * 1000)
+                  
+                  response = results_table.query(
+                      KeyConditionExpression=Key('test_id').eq(test_id) & Key('timestamp').gte(start_time)
+                  )
+                  
+                  # Aggregate results by variant
+                  results = {}
+                  for item in response['Items']:
+                      variant = item['variant']
+                      event_type = item['event_type']
+                      value = float(item['value'])
+                      
+                      if variant not in results:
+                          results[variant] = {}
+                      if event_type not in results[variant]:
+                          results[variant][event_type] = {'count': 0, 'total_value': 0}
+                      
+                      results[variant][event_type]['count'] += 1
+                      results[variant][event_type]['total_value'] += value
+                  
+                  return {
+                      'statusCode': 200,
+                      'body': json.dumps(results, default=str)
+                  }
+                  
+              except Exception as e:
+                  return {
+                      'statusCode': 500,
+                      'body': json.dumps(f'Error: {str(e)}')
+                  }
+          
+          def analyze_statistical_significance(event):
+              test_id = event['test_id']
+              metric = event.get('metric', 'conversion')
+              
+              try:
+                  # Get results for analysis
+                  results_response = get_ab_results({'test_id': test_id, 'hours_back': 168})  # 1 week
+                  results = json.loads(results_response['body'])
+                  
+                  if len(results) < 2:
+                      return {
+                          'statusCode': 400,
+                          'body': json.dumps('Need at least 2 variants for significance testing')
+                      }
+                  
+                  # Simple significance calculation (in production, use proper statistical libraries)
+                  variants = list(results.keys())
+                  variant_a = variants[0]
+                  variant_b = variants[1]
+                  
+                  if metric not in results[variant_a] or metric not in results[variant_b]:
+                      return {
+                          'statusCode': 400,
+                          'body': json.dumps(f'Metric {metric} not found in results')
+                      }
+                  
+                  a_conversions = results[variant_a][metric]['count']
+                  b_conversions = results[variant_b][metric]['count']
+                  
+                  # Calculate conversion rates (simplified)
+                  a_total = sum(results[variant_a][event]['count'] for event in results[variant_a])
+                  b_total = sum(results[variant_b][event]['count'] for event in results[variant_b])
+                  
+                  a_rate = a_conversions / a_total if a_total > 0 else 0
+                  b_rate = b_conversions / b_total if b_total > 0 else 0
+                  
+                  # Simple significance check (in production, use proper statistical tests)
+                  min_sample_size = 100
+                  is_significant = (a_total >= min_sample_size and 
+                                  b_total >= min_sample_size and 
+                                  abs(a_rate - b_rate) > 0.05)  # 5% difference threshold
+                  
+                  winner = variant_a if a_rate > b_rate else variant_b
+                  
+                  analysis = {
+                      'test_id': test_id,
+                      'metric': metric,
+                      'variants': {
+                          variant_a: {
+                              'conversions': a_conversions,
+                              'total': a_total,
+                              'rate': a_rate
+                          },
+                          variant_b: {
+                              'conversions': b_conversions,
+                              'total': b_total,
+                              'rate': b_rate
+                          }
+                      },
+                      'is_significant': is_significant,
+                      'winner': winner if is_significant else None,
+                      'improvement': abs(a_rate - b_rate) if is_significant else 0
+                  }
+                  
+                  return {
+                      'statusCode': 200,
+                      'body': json.dumps(analysis, default=str)
+                  }
+                  
+              except Exception as e:
+                  return {
+                      'statusCode': 500,
+                      'body': json.dumps(f'Error: {str(e)}')
+                  }
+      Environment:
+        Variables:
+          AB_RESULTS_TABLE: !Ref ABTestResultsTable
+          APPLICATION_NAME: !Ref ApplicationName
+
+  # API Gateway for Feature Flag and A/B Testing APIs
+  FeatureFlagAPI:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: !Sub "${ApplicationName}-feature-flags-api"
+      Description: "API for feature flag and A/B testing management"
+      EndpointConfiguration:
+        Types:
+          - REGIONAL
+
+  # API Gateway Resources and Methods
+  FeatureFlagResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref FeatureFlagAPI
+      ParentId: !GetAtt FeatureFlagAPI.RootResourceId
+      PathPart: "flags"
+
+  ABTestResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref FeatureFlagAPI
+      ParentId: !GetAtt FeatureFlagAPI.RootResourceId
+      PathPart: "ab-test"
+
+  # Feature Flag Methods
+  FeatureFlagGetMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref FeatureFlagAPI
+      ResourceId: !Ref FeatureFlagResource
+      HttpMethod: GET
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${FeatureFlagFunction.Arn}/invocations"
+
+  FeatureFlagPostMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref FeatureFlagAPI
+      ResourceId: !Ref FeatureFlagResource
+      HttpMethod: POST
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${FeatureFlagFunction.Arn}/invocations"
+
+  # A/B Test Methods
+  ABTestPostMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref FeatureFlagAPI
+      ResourceId: !Ref ABTestResource
+      HttpMethod: POST
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ABTestAnalyticsFunction.Arn}/invocations"
+
+  ABTestGetMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref FeatureFlagAPI
+      ResourceId: !Ref ABTestResource
+      HttpMethod: GET
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ABTestAnalyticsFunction.Arn}/invocations"
+
+  # API Gateway Deployment
+  APIDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn:
+      - FeatureFlagGetMethod
+      - FeatureFlagPostMethod
+      - ABTestPostMethod
+      - ABTestGetMethod
+    Properties:
+      RestApiId: !Ref FeatureFlagAPI
+      StageName: "v1"
+
+  # Lambda Permissions for API Gateway
+  FeatureFlagAPIPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref FeatureFlagFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${FeatureFlagAPI}/*/*"
+
+  ABTestAPIPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref ABTestAnalyticsFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${FeatureFlagAPI}/*/*"
+
+  # IAM Role for Feature Flag Functions
+  FeatureFlagRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: FeatureFlagPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                Resource:
+                  - !GetAtt FeatureFlagsTable.Arn
+                  - !GetAtt ABTestResultsTable.Arn
+              - Effect: Allow
+                Action:
+                  - cloudwatch:PutMetricData
+                Resource: "*"
+
+  # CloudWatch Dashboard for A/B Testing
+  ABTestDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub "${ApplicationName}-AB-Testing-Dashboard"
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "metric",
+              "x": 0,
+              "y": 0,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  [ "${ApplicationName}/ABTesting", "conversion_count", "Variant", "A" ],
+                  [ ".", ".", ".", "B" ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "Conversion Count by Variant",
+                "period": 300
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12,
+              "y": 0,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  [ "${ApplicationName}/ABTesting", "click_count", "Variant", "A" ],
+                  [ ".", ".", ".", "B" ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "Click Count by Variant",
+                "period": 300
+              }
+            }
+          ]
+        }
+
+Outputs:
+  FeatureFlagsTableName:
+    Description: DynamoDB table name for feature flags
+    Value: !Ref FeatureFlagsTable
+    Export:
+      Name: !Sub "${AWS::StackName}-FeatureFlagsTable"
+  
+  ABTestResultsTableName:
+    Description: DynamoDB table name for A/B test results
+    Value: !Ref ABTestResultsTable
+    Export:
+      Name: !Sub "${AWS::StackName}-ABTestResultsTable"
+  
+  FeatureFlagAPIUrl:
+    Description: API Gateway URL for feature flags
+    Value: !Sub "https://${FeatureFlagAPI}.execute-api.${AWS::Region}.amazonaws.com/v1"
+    Export:
+      Name: !Sub "${AWS::StackName}-FeatureFlagAPIUrl"
+  
+  FeatureFlagFunctionArn:
+    Description: Feature flag Lambda function ARN
+    Value: !GetAtt FeatureFlagFunction.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-FeatureFlagFunctionArn"
+  
+  ABTestAnalyticsFunctionArn:
+    Description: A/B test analytics Lambda function ARN
+    Value: !GetAtt ABTestAnalyticsFunction.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-ABTestAnalyticsFunctionArn"
+  
+  ABTestDashboardURL:
+    Description: CloudWatch Dashboard URL for A/B testing
+    Value: !Sub "https://${AWS::Region}.console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#dashboards:name=${ApplicationName}-AB-Testing-Dashboard"
+    Export:
+      Name: !Sub "${AWS::StackName}-ABTestDashboardURL"

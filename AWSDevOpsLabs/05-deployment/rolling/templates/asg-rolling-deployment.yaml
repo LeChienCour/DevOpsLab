@@ -1,0 +1,665 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Auto Scaling Group Rolling Deployment with Zero-Downtime Updates'
+
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC ID for the deployment
+  
+  SubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Subnet IDs for the Auto Scaling Group
+  
+  ApplicationName:
+    Type: String
+    Description: Name of the application
+    Default: "rolling-asg-demo"
+  
+  InstanceType:
+    Type: String
+    Description: EC2 instance type
+    Default: "t3.micro"
+    AllowedValues:
+      - t3.micro
+      - t3.small
+      - t3.medium
+  
+  MinSize:
+    Type: Number
+    Description: Minimum number of instances
+    Default: 2
+    MinValue: 1
+    MaxValue: 10
+  
+  MaxSize:
+    Type: Number
+    Description: Maximum number of instances
+    Default: 6
+    MinValue: 2
+    MaxValue: 20
+  
+  DesiredCapacity:
+    Type: Number
+    Description: Desired number of instances
+    Default: 4
+    MinValue: 2
+    MaxValue: 10
+
+Resources:
+  # Application Load Balancer
+  ApplicationLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub "${ApplicationName}-alb"
+      Scheme: internet-facing
+      Type: application
+      Subnets: !Ref SubnetIds
+      SecurityGroups:
+        - !Ref ALBSecurityGroup
+      LoadBalancerAttributes:
+        - Key: idle_timeout.timeout_seconds
+          Value: "60"
+
+  # ALB Security Group
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for ALB
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+          Description: "HTTP traffic from internet"
+
+  # Target Group
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub "${ApplicationName}-tg"
+      Port: 80
+      Protocol: HTTP
+      VpcId: !Ref VpcId
+      TargetType: instance
+      HealthCheckPath: /health
+      HealthCheckProtocol: HTTP
+      HealthCheckIntervalSeconds: 30
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: "30"
+        - Key: stickiness.enabled
+          Value: "false"
+
+  # ALB Listener
+  ALBListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroup
+
+  # EC2 Security Group
+  EC2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for EC2 instances
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          SourceSecurityGroupId: !Ref ALBSecurityGroup
+          Description: "HTTP traffic from ALB"
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 10.0.0.0/8
+          Description: "SSH access from VPC"
+
+  # IAM Role for EC2 instances
+  EC2Role:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
+      Policies:
+        - PolicyName: CloudWatchMetricsPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - cloudwatch:PutMetricData
+                  - ec2:DescribeVolumes
+                  - ec2:DescribeTags
+                  - logs:PutLogEvents
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                Resource: "*"
+
+  # Instance Profile
+  EC2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref EC2Role
+
+  # Launch Template
+  LaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: !Sub "${ApplicationName}-launch-template"
+      LaunchTemplateData:
+        ImageId: !Ref LatestAmiId
+        InstanceType: !Ref InstanceType
+        IamInstanceProfile:
+          Arn: !GetAtt EC2InstanceProfile.Arn
+        SecurityGroupIds:
+          - !Ref EC2SecurityGroup
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            yum update -y
+            yum install -y httpd awscli
+            
+            # Install CloudWatch agent
+            wget https://s3.amazonaws.com/amazoncloudwatch-agent/amazon_linux/amd64/latest/amazon-cloudwatch-agent.rpm
+            rpm -U ./amazon-cloudwatch-agent.rpm
+            
+            # Configure and start httpd
+            systemctl start httpd
+            systemctl enable httpd
+            
+            # Get instance metadata
+            INSTANCE_ID=$(curl -s http://169.254.169.254/latest/meta-data/instance-id)
+            AZ=$(curl -s http://169.254.169.254/latest/meta-data/placement/availability-zone)
+            
+            # Create application content
+            cat > /var/www/html/index.html << 'EOF'
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <title>Rolling Deployment Demo</title>
+                <style>
+                    body { 
+                        font-family: Arial, sans-serif; 
+                        text-align: center; 
+                        padding: 50px;
+                        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                        color: white;
+                    }
+                    .container {
+                        background: rgba(255,255,255,0.1);
+                        padding: 30px;
+                        border-radius: 10px;
+                        backdrop-filter: blur(10px);
+                    }
+                    .version { color: #ffeb3b; font-size: 1.2em; }
+                    .instance { color: #4caf50; }
+                </style>
+            </head>
+            <body>
+                <div class="container">
+                    <h1>Rolling Deployment Demo</h1>
+                    <p class="version">Version: 1.0.0</p>
+                    <p class="instance">Instance ID: INSTANCE_ID_PLACEHOLDER</p>
+                    <p>Availability Zone: AZ_PLACEHOLDER</p>
+                    <p>Deployment Type: Rolling Update</p>
+                    <p>Timestamp: $(date)</p>
+                </div>
+            </body>
+            </html>
+            EOF
+            
+            # Replace placeholders with actual values
+            sed -i "s/INSTANCE_ID_PLACEHOLDER/$INSTANCE_ID/g" /var/www/html/index.html
+            sed -i "s/AZ_PLACEHOLDER/$AZ/g" /var/www/html/index.html
+            
+            # Create health check endpoint
+            cat > /var/www/html/health << 'EOF'
+            OK
+            EOF
+            
+            # Create version endpoint
+            cat > /var/www/html/version << 'EOF'
+            {"version": "1.0.0", "deployment_type": "rolling"}
+            EOF
+            
+            # Configure CloudWatch agent
+            cat > /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json << 'EOF'
+            {
+                "metrics": {
+                    "namespace": "${ApplicationName}/EC2",
+                    "metrics_collected": {
+                        "cpu": {
+                            "measurement": [
+                                "cpu_usage_idle",
+                                "cpu_usage_iowait",
+                                "cpu_usage_user",
+                                "cpu_usage_system"
+                            ],
+                            "metrics_collection_interval": 60
+                        },
+                        "disk": {
+                            "measurement": [
+                                "used_percent"
+                            ],
+                            "metrics_collection_interval": 60,
+                            "resources": [
+                                "*"
+                            ]
+                        },
+                        "mem": {
+                            "measurement": [
+                                "mem_used_percent"
+                            ],
+                            "metrics_collection_interval": 60
+                        }
+                    }
+                },
+                "logs": {
+                    "logs_collected": {
+                        "files": {
+                            "collect_list": [
+                                {
+                                    "file_path": "/var/log/httpd/access_log",
+                                    "log_group_name": "/aws/ec2/${ApplicationName}/httpd/access",
+                                    "log_stream_name": "{instance_id}"
+                                },
+                                {
+                                    "file_path": "/var/log/httpd/error_log",
+                                    "log_group_name": "/aws/ec2/${ApplicationName}/httpd/error",
+                                    "log_stream_name": "{instance_id}"
+                                }
+                            ]
+                        }
+                    }
+                }
+            }
+            EOF
+            
+            # Start CloudWatch agent
+            /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
+                -a fetch-config \
+                -m ec2 \
+                -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json \
+                -s
+            
+            # Send custom metric to indicate instance is ready
+            aws cloudwatch put-metric-data \
+                --namespace "${ApplicationName}/Deployment" \
+                --metric-data MetricName=InstanceReady,Value=1,Unit=Count \
+                --region ${AWS::Region}
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+              - Key: Name
+                Value: !Sub "${ApplicationName}-instance"
+              - Key: Application
+                Value: !Ref ApplicationName
+              - Key: DeploymentType
+                Value: Rolling
+
+  # Auto Scaling Group with Rolling Update Policy
+  AutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      AutoScalingGroupName: !Sub "${ApplicationName}-asg"
+      VPCZoneIdentifier: !Ref SubnetIds
+      LaunchTemplate:
+        LaunchTemplateId: !Ref LaunchTemplate
+        Version: !GetAtt LaunchTemplate.LatestVersionNumber
+      MinSize: !Ref MinSize
+      MaxSize: !Ref MaxSize
+      DesiredCapacity: !Ref DesiredCapacity
+      TargetGroupARNs:
+        - !Ref TargetGroup
+      HealthCheckType: ELB
+      HealthCheckGracePeriod: 300
+      DefaultCooldown: 300
+      Tags:
+        - Key: Name
+          Value: !Sub "${ApplicationName}-asg-instance"
+          PropagateAtLaunch: true
+        - Key: Application
+          Value: !Ref ApplicationName
+          PropagateAtLaunch: true
+    UpdatePolicy:
+      AutoScalingRollingUpdate:
+        MinInstancesInService: !Ref MinSize
+        MaxBatchSize: 2
+        PauseTime: PT5M
+        WaitOnResourceSignals: false
+        SuspendProcesses:
+          - HealthCheck
+          - ReplaceUnhealthy
+          - AZRebalance
+          - AlarmNotification
+          - ScheduledActions
+
+  # Scaling Policies
+  ScaleUpPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AdjustmentType: ChangeInCapacity
+      AutoScalingGroupName: !Ref AutoScalingGroup
+      Cooldown: 300
+      ScalingAdjustment: 1
+      PolicyType: SimpleScaling
+
+  ScaleDownPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AdjustmentType: ChangeInCapacity
+      AutoScalingGroupName: !Ref AutoScalingGroup
+      Cooldown: 300
+      ScalingAdjustment: -1
+      PolicyType: SimpleScaling
+
+  # CloudWatch Alarms for Auto Scaling
+  HighCPUAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${ApplicationName}-HighCPU"
+      AlarmDescription: "Scale up on high CPU"
+      MetricName: CPUUtilization
+      Namespace: AWS/EC2
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 70
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: AutoScalingGroupName
+          Value: !Ref AutoScalingGroup
+      AlarmActions:
+        - !Ref ScaleUpPolicy
+
+  LowCPUAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${ApplicationName}-LowCPU"
+      AlarmDescription: "Scale down on low CPU"
+      MetricName: CPUUtilization
+      Namespace: AWS/EC2
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 30
+      ComparisonOperator: LessThanThreshold
+      Dimensions:
+        - Name: AutoScalingGroupName
+          Value: !Ref AutoScalingGroup
+      AlarmActions:
+        - !Ref ScaleDownPolicy
+
+  # Lambda Function for Rolling Update Automation
+  RollingUpdateFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${ApplicationName}-rolling-update"
+      Runtime: python3.9
+      Handler: index.handler
+      Role: !GetAtt RollingUpdateRole.Arn
+      Timeout: 900
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import time
+          
+          autoscaling = boto3.client('autoscaling')
+          ec2 = boto3.client('ec2')
+          elbv2 = boto3.client('elbv2')
+          cloudwatch = boto3.client('cloudwatch')
+          
+          def handler(event, context):
+              action = event.get('action')
+              asg_name = event.get('asg_name')
+              
+              if action == 'start_rolling_update':
+                  return start_rolling_update(event, asg_name)
+              elif action == 'monitor_update':
+                  return monitor_update(event, asg_name)
+              elif action == 'create_new_launch_template':
+                  return create_new_launch_template(event)
+              else:
+                  return {
+                      'statusCode': 400,
+                      'body': json.dumps('Invalid action')
+                  }
+          
+          def start_rolling_update(event, asg_name):
+              new_launch_template_id = event.get('launch_template_id')
+              new_version = event.get('launch_template_version', '$Latest')
+              
+              try:
+                  # Update ASG with new launch template
+                  response = autoscaling.update_auto_scaling_group(
+                      AutoScalingGroupName=asg_name,
+                      LaunchTemplate={
+                          'LaunchTemplateId': new_launch_template_id,
+                          'Version': new_version
+                      }
+                  )
+                  
+                  # Start instance refresh for rolling update
+                  refresh_response = autoscaling.start_instance_refresh(
+                      AutoScalingGroupName=asg_name,
+                      Strategy='Rolling',
+                      Preferences={
+                          'InstanceWarmup': 300,
+                          'MinHealthyPercentage': 50,
+                          'CheckpointPercentages': [25, 50, 75],
+                          'CheckpointDelay': 300
+                      }
+                  )
+                  
+                  return {
+                      'statusCode': 200,
+                      'body': json.dumps({
+                          'message': 'Rolling update started',
+                          'instance_refresh_id': refresh_response['InstanceRefreshId']
+                      })
+                  }
+              except Exception as e:
+                  return {
+                      'statusCode': 500,
+                      'body': json.dumps(f'Error starting rolling update: {str(e)}')
+                  }
+          
+          def monitor_update(event, asg_name):
+              try:
+                  # Get ASG details
+                  asg_response = autoscaling.describe_auto_scaling_groups(
+                      AutoScalingGroupNames=[asg_name]
+                  )
+                  
+                  asg = asg_response['AutoScalingGroups'][0]
+                  
+                  # Get instance refresh status
+                  refresh_response = autoscaling.describe_instance_refreshes(
+                      AutoScalingGroupName=asg_name,
+                      MaxRecords=1
+                  )
+                  
+                  refresh_status = 'None'
+                  if refresh_response['InstanceRefreshes']:
+                      refresh_status = refresh_response['InstanceRefreshes'][0]['Status']
+                  
+                  # Get target group health
+                  target_group_arn = event.get('target_group_arn')
+                  healthy_targets = 0
+                  total_targets = 0
+                  
+                  if target_group_arn:
+                      tg_health = elbv2.describe_target_health(
+                          TargetGroupArn=target_group_arn
+                      )
+                      
+                      total_targets = len(tg_health['TargetHealthDescriptions'])
+                      healthy_targets = sum(1 for target in tg_health['TargetHealthDescriptions'] 
+                                          if target['TargetHealth']['State'] == 'healthy')
+                  
+                  status = {
+                      'asg_name': asg_name,
+                      'desired_capacity': asg['DesiredCapacity'],
+                      'instances_in_service': len([i for i in asg['Instances'] if i['LifecycleState'] == 'InService']),
+                      'total_instances': len(asg['Instances']),
+                      'healthy_targets': healthy_targets,
+                      'total_targets': total_targets,
+                      'instance_refresh_status': refresh_status
+                  }
+                  
+                  # Put custom metrics
+                  cloudwatch.put_metric_data(
+                      Namespace=f'{asg_name}/RollingUpdate',
+                      MetricData=[
+                          {
+                              'MetricName': 'HealthyTargets',
+                              'Value': healthy_targets,
+                              'Unit': 'Count'
+                          },
+                          {
+                              'MetricName': 'InstancesInService',
+                              'Value': status['instances_in_service'],
+                              'Unit': 'Count'
+                          }
+                      ]
+                  )
+                  
+                  return {
+                      'statusCode': 200,
+                      'body': json.dumps(status)
+                  }
+                  
+              except Exception as e:
+                  return {
+                      'statusCode': 500,
+                      'body': json.dumps(f'Error monitoring update: {str(e)}')
+                  }
+          
+          def create_new_launch_template(event):
+              template_name = event.get('template_name')
+              source_template_id = event.get('source_template_id')
+              new_user_data = event.get('new_user_data')
+              
+              try:
+                  # Get source template
+                  response = ec2.describe_launch_template_versions(
+                      LaunchTemplateId=source_template_id,
+                      Versions=['$Latest']
+                  )
+                  
+                  source_template = response['LaunchTemplateVersions'][0]['LaunchTemplateData']
+                  
+                  # Create new template with updated user data
+                  new_template_data = source_template.copy()
+                  if new_user_data:
+                      new_template_data['UserData'] = new_user_data
+                  
+                  # Create new launch template version
+                  new_version_response = ec2.create_launch_template_version(
+                      LaunchTemplateId=source_template_id,
+                      LaunchTemplateData=new_template_data,
+                      VersionDescription=f"Updated version - {int(time.time())}"
+                  )
+                  
+                  return {
+                      'statusCode': 200,
+                      'body': json.dumps({
+                          'message': 'New launch template version created',
+                          'template_id': source_template_id,
+                          'version_number': new_version_response['LaunchTemplateVersion']['VersionNumber']
+                      })
+                  }
+                  
+              except Exception as e:
+                  return {
+                      'statusCode': 500,
+                      'body': json.dumps(f'Error creating launch template: {str(e)}')
+                  }
+
+  # IAM Role for Rolling Update Function
+  RollingUpdateRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: RollingUpdatePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - autoscaling:*
+                  - ec2:DescribeLaunchTemplates
+                  - ec2:DescribeLaunchTemplateVersions
+                  - ec2:CreateLaunchTemplateVersion
+                  - elasticloadbalancing:DescribeTargetHealth
+                  - cloudwatch:PutMetricData
+                Resource: "*"
+
+  # Parameter for Latest AMI ID
+  LatestAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2
+
+Outputs:
+  LoadBalancerDNS:
+    Description: DNS name of the load balancer
+    Value: !GetAtt ApplicationLoadBalancer.DNSName
+    Export:
+      Name: !Sub "${AWS::StackName}-LoadBalancerDNS"
+  
+  ApplicationURL:
+    Description: Application URL
+    Value: !Sub "http://${ApplicationLoadBalancer.DNSName}"
+    Export:
+      Name: !Sub "${AWS::StackName}-ApplicationURL"
+  
+  AutoScalingGroupName:
+    Description: Auto Scaling Group name
+    Value: !Ref AutoScalingGroup
+    Export:
+      Name: !Sub "${AWS::StackName}-AutoScalingGroupName"
+  
+  LaunchTemplateId:
+    Description: Launch Template ID
+    Value: !Ref LaunchTemplate
+    Export:
+      Name: !Sub "${AWS::StackName}-LaunchTemplateId"
+  
+  TargetGroupArn:
+    Description: Target Group ARN
+    Value: !Ref TargetGroup
+    Export:
+      Name: !Sub "${AWS::StackName}-TargetGroupArn"
+  
+  RollingUpdateFunctionArn:
+    Description: Rolling update Lambda function ARN
+    Value: !GetAtt RollingUpdateFunction.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-RollingUpdateFunctionArn"

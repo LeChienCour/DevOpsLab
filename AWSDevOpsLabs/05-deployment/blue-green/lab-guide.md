@@ -1,15 +1,16 @@
 # Blue-Green Deployment Lab Guide
 
 ## Objective
-Learn how to implement blue-green deployment strategies using AWS services to achieve zero-downtime deployments. This lab demonstrates how to maintain two identical production environments (blue and green) and switch traffic between them for seamless application updates.
+Learn how to implement blue-green deployment strategies using AWS services including CodeDeploy, ECS, and Lambda to achieve zero-downtime deployments with automated rollback capabilities. This lab demonstrates how to maintain two identical production environments (blue and green) and switch traffic between them for seamless application updates.
 
 ## Learning Outcomes
 By completing this lab, you will:
-- Understand blue-green deployment concepts and benefits
-- Implement blue-green deployments using Application Load Balancer and target groups
-- Configure automated traffic switching between environments
+- Understand blue-green deployment concepts and benefits for different AWS services
+- Implement blue-green deployments for ECS services using CodeDeploy
+- Configure Lambda alias-based deployments with traffic shifting
+- Set up automated rollback triggers based on CloudWatch metrics
+- Monitor deployment health and performance through comprehensive dashboards
 - Practice rollback procedures for failed deployments
-- Monitor deployment health and performance metrics
 
 ## Prerequisites
 - AWS Account with administrative access
@@ -65,7 +66,261 @@ Approximately 45-60 minutes
 - **Security Groups**: Network access control for instances and load balancer
 - **Launch Template**: Configuration template for EC2 instances
 
-## Lab Steps
+## Lab Approaches
+
+This lab provides two approaches to implement blue-green deployments:
+
+1. **Automated CloudFormation Approach** (Recommended): Uses pre-built CloudFormation templates for ECS and Lambda blue-green deployments with CodeDeploy
+2. **Manual Step-by-Step Approach**: Manual creation of resources for deeper understanding
+
+Choose the approach that best fits your learning objectives and time constraints.
+
+---
+
+## Approach 1: Automated CloudFormation Blue-Green Deployment
+
+This approach uses CloudFormation templates to quickly provision a complete blue-green deployment environment with ECS, Lambda, and automated rollback capabilities.
+
+### Quick Start
+
+1. **Navigate to the lab directory:**
+   ```bash
+   cd AWSDevOpsLabs/05-deployment/blue-green
+   ```
+
+2. **Run the provisioning script:**
+   ```bash
+   ./scripts/provision-blue-green-lab.sh
+   ```
+
+3. **Follow the lab exercises below to test deployments**
+
+4. **Clean up when finished:**
+   ```bash
+   ./scripts/cleanup-blue-green-lab.sh
+   ```
+
+### What Gets Created
+
+The automated provisioning creates:
+
+#### ECS Blue-Green Environment
+- **ECS Cluster**: Fargate-based cluster for containerized applications
+- **Application Load Balancer**: With blue and green target groups
+- **ECS Service**: Configured for blue-green deployments with CodeDeploy
+- **CodeDeploy Application**: For automated blue-green deployments
+
+#### Lambda Blue-Green Environment
+- **Lambda Function**: With production and staging aliases
+- **API Gateway**: For testing Lambda deployments
+- **CodeDeploy Application**: For Lambda alias-based deployments
+
+#### Monitoring and Rollback
+- **CloudWatch Dashboard**: Real-time monitoring of deployment metrics
+- **CloudWatch Alarms**: Automated rollback triggers based on:
+  - Error rates
+  - Response times
+  - Healthy host counts
+  - Custom business metrics
+- **Lambda Function**: Automated rollback execution
+
+### Lab Exercises
+
+#### Exercise 1: ECS Blue-Green Deployment
+
+1. **Access the ECS application:**
+   ```bash
+   # Get the load balancer DNS from the script output
+   curl http://<ALB_DNS_NAME>
+   ```
+
+2. **Test the green environment:**
+   ```bash
+   # Access the test port (8080) to see the green environment
+   curl http://<ALB_DNS_NAME>:8080
+   ```
+
+3. **Simulate a deployment using CodeDeploy:**
+   ```bash
+   # Create a new task definition revision (simulating a new deployment)
+   aws ecs describe-task-definition --task-definition blue-green-ecs-demo-task --query taskDefinition > task-def.json
+   
+   # Modify the image or environment variables in task-def.json
+   # Then register the new task definition
+   aws ecs register-task-definition --cli-input-json file://task-def.json
+   
+   # Trigger a CodeDeploy deployment
+   aws deploy create-deployment \
+     --application-name blue-green-demo-codedeploy-app \
+     --deployment-group-name blue-green-demo-deployment-group \
+     --revision revisionType=S3,s3Location=bucket=<bucket>,key=<key>
+   ```
+
+4. **Monitor the deployment:**
+   - Access the CloudWatch dashboard URL provided in the script output
+   - Watch metrics during the deployment process
+   - Observe traffic shifting between blue and green environments
+
+#### Exercise 2: Lambda Blue-Green Deployment
+
+1. **Test the current Lambda function:**
+   ```bash
+   # Use the API Gateway URL from the script output
+   curl <API_GATEWAY_URL>
+   ```
+
+2. **Update the Lambda function code:**
+   ```bash
+   # Create a new version of the Lambda function
+   cat > new_lambda_function.py << 'EOF'
+import json
+import os
+import boto3
+
+def handler(event, context):
+    version = "2.0.0"  # Updated version
+    environment = os.environ.get('ENVIRONMENT', 'production')
+    
+    cloudwatch = boto3.client('cloudwatch')
+    
+    try:
+        response_data = {
+            'statusCode': 200,
+            'body': json.dumps({
+                'message': f'Hello from UPDATED version {version} in {environment}!',
+                'timestamp': context.aws_request_id,
+                'version': version,
+                'environment': environment,
+                'new_feature': 'Enhanced functionality!'
+            })
+        }
+        
+        # Put successful business metric
+        cloudwatch.put_metric_data(
+            Namespace=f'{context.function_name}/Custom',
+            MetricData=[
+                {
+                    'MetricName': 'BusinessMetric',
+                    'Value': 200,  # Higher success metric
+                    'Unit': 'Count'
+                }
+            ]
+        )
+        
+        return response_data
+        
+    except Exception as e:
+        return {
+            'statusCode': 500,
+            'body': json.dumps({'error': str(e)})
+        }
+EOF
+   
+   # Package and update the function
+   zip new-lambda-function.zip new_lambda_function.py
+   aws lambda update-function-code \
+     --function-name blue-green-lambda-demo \
+     --zip-file fileb://new-lambda-function.zip
+   ```
+
+3. **Create a new version and update alias:**
+   ```bash
+   # Publish a new version
+   NEW_VERSION=$(aws lambda publish-version \
+     --function-name blue-green-lambda-demo \
+     --description "Updated version with new features" \
+     --query Version --output text)
+   
+   # Update the staging alias to point to the new version
+   aws lambda update-alias \
+     --function-name blue-green-lambda-demo \
+     --name STAGING \
+     --function-version $NEW_VERSION
+   ```
+
+4. **Test gradual traffic shifting:**
+   ```bash
+   # Configure weighted alias for gradual rollout
+   aws lambda update-alias \
+     --function-name blue-green-lambda-demo \
+     --name PROD \
+     --function-version $NEW_VERSION \
+     --routing-config AdditionalVersionWeights="{\"$NEW_VERSION\":0.1}"
+   
+   # Test multiple times to see traffic distribution
+   for i in {1..10}; do
+     curl <API_GATEWAY_URL> | jq '.body' | jq -r '.version'
+     sleep 1
+   done
+   ```
+
+#### Exercise 3: Automated Rollback Testing
+
+1. **Trigger a rollback scenario:**
+   ```bash
+   # Create a Lambda function that will cause errors
+   cat > failing_lambda_function.py << 'EOF'
+import json
+
+def handler(event, context):
+    # This will cause errors to trigger rollback
+    raise Exception("Simulated deployment failure")
+EOF
+   
+   # Deploy the failing version
+   zip failing-lambda-function.zip failing_lambda_function.py
+   aws lambda update-function-code \
+     --function-name blue-green-lambda-demo \
+     --zip-file fileb://failing-lambda-function.zip
+   
+   # Publish and update alias
+   FAILING_VERSION=$(aws lambda publish-version \
+     --function-name blue-green-lambda-demo \
+     --description "Failing version to test rollback" \
+     --query Version --output text)
+   
+   aws lambda update-alias \
+     --function-name blue-green-lambda-demo \
+     --name STAGING \
+     --function-version $FAILING_VERSION
+   ```
+
+2. **Monitor CloudWatch alarms:**
+   - Watch the CloudWatch dashboard for alarm triggers
+   - Observe the automated rollback function execution
+   - Check SNS notifications if configured
+
+3. **Verify rollback occurred:**
+   ```bash
+   # Test the function to confirm it's back to working version
+   curl <API_GATEWAY_URL>
+   ```
+
+### Understanding the Templates
+
+#### ECS Blue-Green Template Features
+- **Dual Target Groups**: Separate blue and green target groups for traffic management
+- **CodeDeploy Integration**: Automated blue-green deployment configuration
+- **Health Checks**: Comprehensive health checking for both environments
+- **Auto Rollback**: Configured rollback triggers based on deployment failures
+
+#### Lambda Alias Template Features
+- **Production/Staging Aliases**: Separate aliases for blue-green deployments
+- **Weighted Routing**: Gradual traffic shifting capabilities
+- **API Gateway Integration**: Testing endpoints for both environments
+- **CloudWatch Integration**: Custom metrics for business logic monitoring
+
+#### Monitoring Template Features
+- **Comprehensive Alarms**: Error rates, response times, and custom metrics
+- **Automated Rollback**: Lambda function for automatic deployment rollback
+- **Dashboard**: Real-time visualization of deployment health
+- **Composite Alarms**: Combined health indicators for overall system status
+
+---
+
+## Approach 2: Manual Step-by-Step Implementation
+
+For a deeper understanding of blue-green deployment concepts, follow the manual implementation below.
 
 ### Step 1: Create VPC and Networking Components
 

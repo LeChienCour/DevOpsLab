@@ -679,4 +679,420 @@ Key concepts to remember:
 - [Rolling Deployments with AWS CodeDeploy](https://docs.aws.amazon.com/codedeploy/latest/userguide/applications-create-in-place.html)
 - [Auto Scaling Group Health Checks](https://docs.aws.amazon.com/autoscaling/ec2/userguide/healthcheck.html)
 - [Application Load Balancer Health Checks](https://docs.aws.amazon.com/elasticloadbalancing/latest/application/target-group-health-checks.html)
-- [Best Practices for Rolling Deployments](https://aws.amazon.com/builders-library/automating-safe-hands-off-deployments/)
+- [Best Practices for Rolling Deployments](https://aws.amazon.com/builders-library/automating-safe-hands-off-deployments/)## La
+b Approaches
+
+This lab provides an automated CloudFormation approach for comprehensive rolling deployment testing with both ECS and Auto Scaling Group implementations.
+
+### Quick Start
+
+1. **Navigate to the lab directory:**
+   ```bash
+   cd AWSDevOpsLabs/05-deployment/rolling
+   ```
+
+2. **Run the provisioning script:**
+   ```bash
+   ./scripts/provision-rolling-lab.sh
+   ```
+
+3. **Follow the lab exercises below to test deployments**
+
+4. **Clean up when finished:**
+   ```bash
+   ./scripts/cleanup-rolling-lab.sh
+   ```
+
+### What Gets Created
+
+The automated provisioning creates:
+
+#### ECS Rolling Deployment Infrastructure
+- **ECS Cluster**: Fargate-based cluster with Container Insights enabled
+- **ECS Service**: Configured for rolling deployments with circuit breaker
+- **Task Definition**: Containerized application with health checks
+- **Application Load Balancer**: With comprehensive health checking
+- **Deployment Automation**: Lambda function for automated deployment management
+
+#### Auto Scaling Group Rolling Deployment Infrastructure
+- **Auto Scaling Group**: With rolling update policy and instance refresh capability
+- **Launch Template**: EC2 instance configuration with user data for application setup
+- **Application Load Balancer**: With target group health checking
+- **Rolling Update Automation**: Lambda function for instance refresh management
+
+#### Health Monitoring and Recovery Systems
+- **CloudWatch Dashboards**: Real-time monitoring of deployment health and application metrics
+- **Health Check Lambda**: Automated health monitoring with custom metrics
+- **CloudWatch Alarms**: Multi-dimensional monitoring including health percentage, availability, and target health
+- **EventBridge Rules**: Scheduled health checks every 5 minutes
+- **Auto Recovery Lambda**: Automated recovery actions based on alarm triggers
+- **SNS Topics**: Notifications for health alerts and recovery actions
+
+### Lab Exercises
+
+#### Exercise 1: ECS Rolling Deployment
+
+1. **Test the initial ECS deployment:**
+   ```bash
+   # Get the ECS load balancer DNS from the script output
+   ECS_ALB_DNS="<ECS_ALB_DNS_NAME>"
+   
+   # Test the application
+   curl http://$ECS_ALB_DNS
+   curl http://$ECS_ALB_DNS/health
+   curl http://$ECS_ALB_DNS/version
+   
+   # Test multiple times to see different task responses
+   for i in {1..10}; do
+     curl -s http://$ECS_ALB_DNS | grep -o "Instance ID: [a-z0-9-]*" || echo "No instance ID found"
+     sleep 1
+   done
+   ```
+
+2. **Monitor ECS service status:**
+   ```bash
+   # Check ECS service details
+   aws ecs describe-services \
+     --cluster rolling-ecs-demo-cluster \
+     --services rolling-ecs-demo-service \
+     --query 'services[0].[serviceName,status,runningCount,pendingCount,desiredCount]' \
+     --output table
+   
+   # Check task health
+   aws ecs list-tasks \
+     --cluster rolling-ecs-demo-cluster \
+     --service-name rolling-ecs-demo-service
+   ```
+
+3. **Perform ECS rolling deployment:**
+   ```bash
+   # Deploy a new version using the helper script
+   ./ecs-deploy.sh deploy nginx:1.21 2.0.0
+   
+   # Monitor deployment progress
+   ./ecs-deploy.sh monitor
+   
+   # Check deployment status
+   ./ecs-deploy.sh status
+   ```
+
+4. **Observe zero-downtime deployment:**
+   ```bash
+   # Monitor application availability during deployment
+   while true; do
+     response=$(curl -s -o /dev/null -w "%{http_code}" http://$ECS_ALB_DNS)
+     version=$(curl -s http://$ECS_ALB_DNS/version | jq -r '.version' 2>/dev/null || echo "unknown")
+     echo "$(date): HTTP $response, Version: $version"
+     sleep 2
+   done
+   ```
+
+#### Exercise 2: Auto Scaling Group Rolling Deployment
+
+1. **Test the initial ASG deployment:**
+   ```bash
+   # Get the ASG load balancer DNS from the script output
+   ASG_ALB_DNS="<ASG_ALB_DNS_NAME>"
+   
+   # Test the application
+   curl http://$ASG_ALB_DNS
+   curl http://$ASG_ALB_DNS/health
+   curl http://$ASG_ALB_DNS/version
+   
+   # Test multiple times to see different instance responses
+   for i in {1..10}; do
+     curl -s http://$ASG_ALB_DNS | grep -o "Instance ID: [a-z0-9-]*" || echo "No instance ID found"
+     sleep 1
+   done
+   ```
+
+2. **Monitor Auto Scaling Group status:**
+   ```bash
+   # Check ASG details
+   aws autoscaling describe-auto-scaling-groups \
+     --auto-scaling-group-names rolling-asg-demo-asg \
+     --query 'AutoScalingGroups[0].[AutoScalingGroupName,DesiredCapacity,MinSize,MaxSize]' \
+     --output table
+   
+   # Check instance health
+   aws autoscaling describe-auto-scaling-groups \
+     --auto-scaling-group-names rolling-asg-demo-asg \
+     --query 'AutoScalingGroups[0].Instances[*].[InstanceId,LifecycleState,HealthStatus]' \
+     --output table
+   ```
+
+3. **Perform ASG rolling deployment:**
+   ```bash
+   # Deploy a new version using the helper script
+   ./asg-deploy.sh deploy 2.0.0
+   
+   # Monitor deployment progress
+   ./asg-deploy.sh monitor
+   
+   # Check deployment status
+   ./asg-deploy.sh status
+   ```
+
+4. **Observe instance refresh process:**
+   ```bash
+   # Monitor application availability during instance refresh
+   while true; do
+     response=$(curl -s -o /dev/null -w "%{http_code}" http://$ASG_ALB_DNS)
+     version=$(curl -s http://$ASG_ALB_DNS/version | jq -r '.version' 2>/dev/null || echo "unknown")
+     instance_count=$(aws elbv2 describe-target-health --target-group-arn <ASG_TARGET_GROUP_ARN> --query 'TargetHealthDescriptions[?TargetHealth.State==`healthy`]' --output json | jq length)
+     echo "$(date): HTTP $response, Version: $version, Healthy Instances: $instance_count"
+     sleep 5
+   done
+   ```
+
+#### Exercise 3: Health Monitoring and Automated Recovery
+
+1. **Access health dashboards:**
+   ```bash
+   # Get dashboard URLs from the provisioning output
+   echo "ECS Health Dashboard: <ECS_DASHBOARD_URL>"
+   echo "ASG Health Dashboard: <ASG_DASHBOARD_URL>"
+   
+   # Open dashboards in browser to monitor:
+   # - Load balancer metrics (response time, request count, error rates)
+   # - Target health (healthy/unhealthy host counts)
+   # - Application health metrics (health percentage, availability)
+   ```
+
+2. **Test health check automation:**
+   ```bash
+   # Manually trigger health check for ECS
+   aws lambda invoke \
+     --function-name rolling-ecs-demo-health-monitor \
+     --payload '{
+       "action": "health_check",
+       "target_group_arn": "<ECS_TARGET_GROUP_ARN>",
+       "load_balancer_dns": "<ECS_ALB_DNS>"
+     }' \
+     /tmp/ecs-health-response.json
+   
+   cat /tmp/ecs-health-response.json | jq '.'
+   
+   # Manually trigger health check for ASG
+   aws lambda invoke \
+     --function-name rolling-asg-demo-health-monitor \
+     --payload '{
+       "action": "health_check",
+       "target_group_arn": "<ASG_TARGET_GROUP_ARN>",
+       "load_balancer_dns": "<ASG_ALB_DNS>"
+     }' \
+     /tmp/asg-health-response.json
+   
+   cat /tmp/asg-health-response.json | jq '.'
+   ```
+
+3. **Test availability monitoring:**
+   ```bash
+   # Check availability over the last hour
+   aws lambda invoke \
+     --function-name rolling-ecs-demo-health-monitor \
+     --payload '{
+       "action": "availability_check",
+       "target_group_arn": "<ECS_TARGET_GROUP_ARN>",
+       "time_window_minutes": 60
+     }' \
+     /tmp/availability-response.json
+   
+   cat /tmp/availability-response.json | jq '.'
+   ```
+
+4. **Simulate health issues and observe recovery:**
+   ```bash
+   # Simulate unhealthy targets by stopping ECS tasks
+   TASK_ARNS=$(aws ecs list-tasks \
+     --cluster rolling-ecs-demo-cluster \
+     --service-name rolling-ecs-demo-service \
+     --query 'taskArns[0]' \
+     --output text)
+   
+   # Stop one task to trigger unhealthy target alarm
+   aws ecs stop-task \
+     --cluster rolling-ecs-demo-cluster \
+     --task $TASK_ARNS \
+     --reason "Testing health monitoring"
+   
+   # Monitor alarm state changes
+   aws cloudwatch describe-alarms \
+     --alarm-names rolling-ecs-demo-UnhealthyTargets \
+     --query 'MetricAlarms[0].[AlarmName,StateValue,StateReason]' \
+     --output table
+   ```
+
+#### Exercise 4: Deployment Circuit Breaker Testing
+
+1. **Test ECS deployment circuit breaker:**
+   ```bash
+   # Create a failing task definition
+   aws ecs describe-task-definition \
+     --task-definition rolling-ecs-demo-task \
+     --query taskDefinition > failing-task-def.json
+   
+   # Modify to use a non-existent image
+   jq '.containerDefinitions[0].image = "nginx:nonexistent-tag"' failing-task-def.json > modified-task-def.json
+   jq 'del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .placementConstraints, .compatibilities, .registeredAt, .registeredBy)' modified-task-def.json > final-task-def.json
+   
+   # Register failing task definition
+   FAILING_TASK_DEF=$(aws ecs register-task-definition \
+     --cli-input-json file://final-task-def.json \
+     --query 'taskDefinition.taskDefinitionArn' \
+     --output text)
+   
+   # Deploy failing version to trigger circuit breaker
+   aws ecs update-service \
+     --cluster rolling-ecs-demo-cluster \
+     --service rolling-ecs-demo-service \
+     --task-definition $FAILING_TASK_DEF
+   
+   # Monitor circuit breaker activation
+   ./ecs-deploy.sh monitor
+   ```
+
+2. **Observe automatic rollback:**
+   ```bash
+   # Check service events for circuit breaker activation
+   aws ecs describe-services \
+     --cluster rolling-ecs-demo-cluster \
+     --services rolling-ecs-demo-service \
+     --query 'services[0].events[0:5].[createdAt,message]' \
+     --output table
+   
+   # Verify service returns to stable state
+   ./ecs-deploy.sh status
+   ```
+
+## Troubleshooting Guide
+
+### Common Issues and Solutions
+
+1. **ECS tasks failing to start:**
+   - Check task definition for correct image URI and resource allocation
+   - Verify security group rules allow traffic from ALB
+   - Check CloudWatch logs for container startup errors
+   - Ensure task execution role has proper permissions
+
+2. **ASG instances failing health checks:**
+   - Verify user data script executes successfully
+   - Check security group rules allow ALB health check traffic
+   - Ensure application starts correctly and responds on health check path
+   - Review CloudWatch logs for application errors
+
+3. **Rolling deployment stuck:**
+   - Check minimum healthy percentage configuration
+   - Verify health check settings (path, timeout, thresholds)
+   - Monitor CloudWatch alarms for deployment issues
+   - Check for resource constraints (CPU, memory, network)
+
+4. **Circuit breaker not triggering:**
+   - Verify deployment configuration has circuit breaker enabled
+   - Check alarm thresholds and evaluation periods
+   - Ensure proper IAM permissions for circuit breaker actions
+   - Review deployment events for circuit breaker status
+
+### Debugging Commands
+
+```bash
+# Check ECS service events
+aws ecs describe-services --cluster <cluster> --services <service> --query 'services[0].events[0:10]'
+
+# Check ASG activity history
+aws autoscaling describe-scaling-activities --auto-scaling-group-name <asg-name> --max-items 10
+
+# Check target group health
+aws elbv2 describe-target-health --target-group-arn <target-group-arn>
+
+# Check CloudWatch logs
+aws logs filter-log-events --log-group-name <log-group> --start-time <timestamp>
+
+# Check instance refresh status
+aws autoscaling describe-instance-refreshes --auto-scaling-group-name <asg-name> --max-records 5
+```
+
+## Resources Created
+
+This lab creates the following AWS resources:
+
+### ECS Infrastructure
+- **ECS Cluster**: Fargate cluster with Container Insights
+- **ECS Service**: Rolling deployment configuration with circuit breaker
+- **Task Definition**: Containerized application with health checks
+- **Application Load Balancer**: Internet-facing ALB with health checking
+- **Target Group**: ECS service target group with health check configuration
+
+### Auto Scaling Group Infrastructure
+- **Auto Scaling Group**: Rolling update policy with instance refresh
+- **Launch Template**: EC2 instance configuration with versioning
+- **Application Load Balancer**: Internet-facing ALB for ASG instances
+- **Target Group**: ASG target group with health check configuration
+- **Scaling Policies**: CPU-based auto scaling policies
+
+### Monitoring and Automation
+- **CloudWatch Dashboards**: Health monitoring dashboards for both deployments
+- **CloudWatch Alarms**: Health, availability, and performance monitoring
+- **Lambda Functions**: Deployment automation and health monitoring
+- **EventBridge Rules**: Scheduled health checks
+- **SNS Topics**: Health alert notifications
+
+### Estimated Costs
+- ECS Fargate Tasks (4 tasks): ~$1.44/day
+- EC2 Instances (4 x t3.micro): ~$1.16/day
+- Application Load Balancers (2): ~$1.08/day
+- Lambda Functions: ~$0.02/day
+- CloudWatch: ~$0.50/day
+- **Total estimated cost**: ~$4.20/day
+
+## Cleanup
+
+When you're finished with the lab, run the cleanup script:
+
+```bash
+./scripts/cleanup-rolling-lab.sh
+```
+
+This will remove all created resources including:
+- CloudFormation stacks
+- CloudWatch log groups, alarms, and dashboards
+- Lambda functions
+- EventBridge rules
+- SNS topics
+- Local helper scripts
+
+> **Important**: Failure to clean up resources may result in unexpected charges to your AWS account.
+
+## Next Steps
+
+After completing this lab, consider:
+
+1. **Implement blue-green deployments** for instant traffic switching
+2. **Add canary deployments** for gradual traffic shifting
+3. **Integrate with CI/CD pipelines** for automated rolling deployments
+4. **Explore advanced health checks** with custom metrics
+5. **Add multi-region rolling deployments** for global applications
+
+## Certification Exam Tips
+
+This lab covers several key areas for the AWS DevOps Professional exam:
+
+- **Domain 2**: Configuration Management and Infrastructure as Code (Rolling deployment patterns)
+- **Domain 3**: Monitoring and Logging (Application monitoring and health checks)
+- **Domain 4**: Policies and Standards Automation (Automated deployment strategies)
+- **Domain 5**: Incident and Event Response (Circuit breakers and automated recovery)
+
+Key concepts to remember:
+- Rolling deployments provide zero-downtime updates by gradually replacing instances/tasks
+- Circuit breakers automatically rollback failed deployments
+- Health checks are critical for determining deployment success
+- Instance refresh provides modern rolling update capabilities for Auto Scaling Groups
+- ECS deployment configuration controls rolling update behavior
+
+## Additional Resources
+
+- [ECS Rolling Deployments](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/deployment-types.html)
+- [Auto Scaling Group Instance Refresh](https://docs.aws.amazon.com/autoscaling/ec2/userguide/asg-instance-refresh.html)
+- [ECS Deployment Circuit Breaker](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/deployment-circuit-breaker.html)
+- [Application Load Balancer Health Checks](https://docs.aws.amazon.com/elasticloadbalancing/latest/application/target-group-health-checks.html)
+- [CloudWatch Container Insights](https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/ContainerInsights.html)

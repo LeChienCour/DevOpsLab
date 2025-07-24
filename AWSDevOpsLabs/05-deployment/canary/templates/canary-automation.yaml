@@ -1,0 +1,683 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Canary Deployment Automation with CloudWatch Alarms and A/B Testing'
+
+Parameters:
+  ApplicationName:
+    Type: String
+    Description: Name of the application
+    Default: "canary-demo-app"
+  
+  LoadBalancerFullName:
+    Type: String
+    Description: Full name of the Application Load Balancer
+  
+  ProductionTargetGroupFullName:
+    Type: String
+    Description: Full name of the Production Target Group
+  
+  CanaryTargetGroupFullName:
+    Type: String
+    Description: Full name of the Canary Target Group
+  
+  TrafficShiftingFunctionArn:
+    Type: String
+    Description: ARN of the traffic shifting Lambda function
+  
+  SNSTopicArn:
+    Type: String
+    Description: SNS Topic ARN for notifications
+    Default: ""
+
+Conditions:
+  HasSNSTopic: !Not [!Equals [!Ref SNSTopicArn, ""]]
+
+Resources:
+  # CloudWatch Dashboard for Canary Monitoring
+  CanaryDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub "${ApplicationName}-Canary-Dashboard"
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "metric",
+              "x": 0,
+              "y": 0,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  [ "AWS/ApplicationELB", "RequestCount", "LoadBalancer", "${LoadBalancerFullName}" ],
+                  [ ".", "TargetResponseTime", ".", "." ],
+                  [ ".", "HTTPCode_Target_2XX_Count", ".", "." ],
+                  [ ".", "HTTPCode_Target_4XX_Count", ".", "." ],
+                  [ ".", "HTTPCode_Target_5XX_Count", ".", "." ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "Overall Load Balancer Metrics",
+                "period": 300
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12,
+              "y": 0,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  [ "AWS/ApplicationELB", "RequestCount", "TargetGroup", "${ProductionTargetGroupFullName}" ],
+                  [ ".", ".", ".", "${CanaryTargetGroupFullName}" ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "Request Distribution (Production vs Canary)",
+                "period": 300
+              }
+            },
+            {
+              "type": "metric",
+              "x": 0,
+              "y": 6,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  [ "AWS/ApplicationELB", "TargetResponseTime", "TargetGroup", "${ProductionTargetGroupFullName}" ],
+                  [ ".", ".", ".", "${CanaryTargetGroupFullName}" ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "Response Time Comparison",
+                "period": 300
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12,
+              "y": 6,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  [ "AWS/ApplicationELB", "HTTPCode_Target_5XX_Count", "TargetGroup", "${ProductionTargetGroupFullName}" ],
+                  [ ".", ".", ".", "${CanaryTargetGroupFullName}" ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "Error Rate Comparison",
+                "period": 300
+              }
+            },
+            {
+              "type": "metric",
+              "x": 0,
+              "y": 12,
+              "width": 24,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  [ "${ApplicationName}/Canary", "CanaryTrafficPercentage" ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "Canary Traffic Percentage",
+                "period": 300,
+                "yAxis": {
+                  "left": {
+                    "min": 0,
+                    "max": 100
+                  }
+                }
+              }
+            }
+          ]
+        }
+
+  # Canary Error Rate Alarm
+  CanaryErrorRateAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${ApplicationName}-Canary-HighErrorRate"
+      AlarmDescription: "Canary deployment error rate is too high"
+      MetricName: HTTPCode_Target_5XX_Count
+      Namespace: AWS/ApplicationELB
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 5
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: TargetGroup
+          Value: !Ref CanaryTargetGroupFullName
+      AlarmActions:
+        - !Ref RollbackTopic
+        - !If [HasSNSTopic, !Ref SNSTopicArn, !Ref "AWS::NoValue"]
+      TreatMissingData: notBreaching
+
+  # Canary Response Time Alarm
+  CanaryResponseTimeAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${ApplicationName}-Canary-HighResponseTime"
+      AlarmDescription: "Canary deployment response time is too high"
+      MetricName: TargetResponseTime
+      Namespace: AWS/ApplicationELB
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 3
+      Threshold: 2.0
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: TargetGroup
+          Value: !Ref CanaryTargetGroupFullName
+      AlarmActions:
+        - !Ref RollbackTopic
+        - !If [HasSNSTopic, !Ref SNSTopicArn, !Ref "AWS::NoValue"]
+      TreatMissingData: notBreaching
+
+  # Production vs Canary Error Rate Comparison
+  ErrorRateComparisonAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${ApplicationName}-Canary-ErrorRateComparison"
+      AlarmDescription: "Canary error rate significantly higher than production"
+      MetricName: HTTPCode_Target_5XX_Count
+      Namespace: AWS/ApplicationELB
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: TargetGroup
+          Value: !Ref CanaryTargetGroupFullName
+      AlarmActions:
+        - !Ref RollbackTopic
+        - !If [HasSNSTopic, !Ref SNSTopicArn, !Ref "AWS::NoValue"]
+      TreatMissingData: notBreaching
+
+  # Success Rate Alarm for Promotion
+  CanarySuccessAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${ApplicationName}-Canary-Success"
+      AlarmDescription: "Canary deployment is performing well - ready for promotion"
+      MetricName: HTTPCode_Target_2XX_Count
+      Namespace: AWS/ApplicationELB
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 3
+      Threshold: 50
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: TargetGroup
+          Value: !Ref CanaryTargetGroupFullName
+      AlarmActions:
+        - !Ref PromotionTopic
+        - !If [HasSNSTopic, !Ref SNSTopicArn, !Ref "AWS::NoValue"]
+      TreatMissingData: breaching
+
+  # Custom Business Metrics Alarm
+  BusinessMetricAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${ApplicationName}-Canary-BusinessMetric"
+      AlarmDescription: "Custom business metric for canary validation"
+      MetricName: ConversionRate
+      Namespace: !Sub "${ApplicationName}/Business"
+      Statistic: Average
+      Period: 600
+      EvaluationPeriods: 2
+      Threshold: 0.05
+      ComparisonOperator: LessThanThreshold
+      AlarmActions:
+        - !Ref RollbackTopic
+        - !If [HasSNSTopic, !Ref SNSTopicArn, !Ref "AWS::NoValue"]
+      TreatMissingData: notBreaching
+
+  # SNS Topics for Automation
+  RollbackTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub "${ApplicationName}-canary-rollback"
+      DisplayName: "Canary Deployment Rollback Notifications"
+
+  PromotionTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub "${ApplicationName}-canary-promotion"
+      DisplayName: "Canary Deployment Promotion Notifications"
+
+  # Lambda Function for Automated Rollback
+  RollbackFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${ApplicationName}-canary-rollback"
+      Runtime: python3.9
+      Handler: index.handler
+      Role: !GetAtt AutomationRole.Arn
+      Timeout: 300
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+          
+          lambda_client = boto3.client('lambda')
+          
+          def handler(event, context):
+              print(f"Received rollback event: {json.dumps(event)}")
+              
+              traffic_function_arn = os.environ['TRAFFIC_FUNCTION_ARN']
+              
+              try:
+                  # Invoke traffic shifting function to rollback
+                  response = lambda_client.invoke(
+                      FunctionName=traffic_function_arn,
+                      InvocationType='RequestResponse',
+                      Payload=json.dumps({
+                          'action': 'rollback'
+                      })
+                  )
+                  
+                  result = json.loads(response['Payload'].read())
+                  print(f"Rollback result: {result}")
+                  
+                  return {
+                      'statusCode': 200,
+                      'body': json.dumps('Canary rollback completed successfully')
+                  }
+                  
+              except Exception as e:
+                  print(f"Error during rollback: {str(e)}")
+                  return {
+                      'statusCode': 500,
+                      'body': json.dumps(f'Rollback failed: {str(e)}')
+                  }
+      Environment:
+        Variables:
+          TRAFFIC_FUNCTION_ARN: !Ref TrafficShiftingFunctionArn
+
+  # Lambda Function for Automated Promotion
+  PromotionFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${ApplicationName}-canary-promotion"
+      Runtime: python3.9
+      Handler: index.handler
+      Role: !GetAtt AutomationRole.Arn
+      Timeout: 300
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+          
+          lambda_client = boto3.client('lambda')
+          
+          def handler(event, context):
+              print(f"Received promotion event: {json.dumps(event)}")
+              
+              traffic_function_arn = os.environ['TRAFFIC_FUNCTION_ARN']
+              
+              try:
+                  # Gradually increase canary traffic
+                  for step in [25, 50, 75, 100]:
+                      response = lambda_client.invoke(
+                          FunctionName=traffic_function_arn,
+                          InvocationType='RequestResponse',
+                          Payload=json.dumps({
+                              'action': 'set_weight',
+                              'canary_weight': step
+                          })
+                      )
+                      
+                      result = json.loads(response['Payload'].read())
+                      print(f"Traffic shift to {step}%: {result}")
+                      
+                      # Wait between steps (in real implementation, this would be done via Step Functions)
+                      import time
+                      time.sleep(30)
+                  
+                  return {
+                      'statusCode': 200,
+                      'body': json.dumps('Canary promotion completed successfully')
+                  }
+                  
+              except Exception as e:
+                  print(f"Error during promotion: {str(e)}")
+                  return {
+                      'statusCode': 500,
+                      'body': json.dumps(f'Promotion failed: {str(e)}')
+                  }
+      Environment:
+        Variables:
+          TRAFFIC_FUNCTION_ARN: !Ref TrafficShiftingFunctionArn
+
+  # Step Functions State Machine for Gradual Promotion
+  CanaryPromotionStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: !Sub "${ApplicationName}-canary-promotion"
+      RoleArn: !GetAtt StepFunctionsRole.Arn
+      DefinitionString: !Sub |
+        {
+          "Comment": "Gradual canary promotion with monitoring",
+          "StartAt": "IncreaseTrafficTo25",
+          "States": {
+            "IncreaseTrafficTo25": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "${TrafficShiftingFunctionArn}",
+                "Payload": {
+                  "action": "set_weight",
+                  "canary_weight": 25
+                }
+              },
+              "Next": "Wait5Minutes"
+            },
+            "Wait5Minutes": {
+              "Type": "Wait",
+              "Seconds": 300,
+              "Next": "CheckHealth25"
+            },
+            "CheckHealth25": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "${HealthCheckFunction}",
+                "Payload": {
+                  "target_group": "${CanaryTargetGroupFullName}",
+                  "threshold": 25
+                }
+              },
+              "Next": "IsHealthy25",
+              "Catch": [
+                {
+                  "ErrorEquals": ["States.ALL"],
+                  "Next": "RollbackCanary"
+                }
+              ]
+            },
+            "IsHealthy25": {
+              "Type": "Choice",
+              "Choices": [
+                {
+                  "Variable": "$.healthy",
+                  "BooleanEquals": true,
+                  "Next": "IncreaseTrafficTo50"
+                }
+              ],
+              "Default": "RollbackCanary"
+            },
+            "IncreaseTrafficTo50": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "${TrafficShiftingFunctionArn}",
+                "Payload": {
+                  "action": "set_weight",
+                  "canary_weight": 50
+                }
+              },
+              "Next": "Wait10Minutes"
+            },
+            "Wait10Minutes": {
+              "Type": "Wait",
+              "Seconds": 600,
+              "Next": "CheckHealth50"
+            },
+            "CheckHealth50": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "${HealthCheckFunction}",
+                "Payload": {
+                  "target_group": "${CanaryTargetGroupFullName}",
+                  "threshold": 50
+                }
+              },
+              "Next": "IsHealthy50",
+              "Catch": [
+                {
+                  "ErrorEquals": ["States.ALL"],
+                  "Next": "RollbackCanary"
+                }
+              ]
+            },
+            "IsHealthy50": {
+              "Type": "Choice",
+              "Choices": [
+                {
+                  "Variable": "$.healthy",
+                  "BooleanEquals": true,
+                  "Next": "PromoteToProduction"
+                }
+              ],
+              "Default": "RollbackCanary"
+            },
+            "PromoteToProduction": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "${TrafficShiftingFunctionArn}",
+                "Payload": {
+                  "action": "promote"
+                }
+              },
+              "Next": "PromotionComplete"
+            },
+            "RollbackCanary": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "${TrafficShiftingFunctionArn}",
+                "Payload": {
+                  "action": "rollback"
+                }
+              },
+              "Next": "RollbackComplete"
+            },
+            "PromotionComplete": {
+              "Type": "Succeed"
+            },
+            "RollbackComplete": {
+              "Type": "Fail",
+              "Cause": "Canary deployment failed health checks"
+            }
+          }
+        }
+
+  # Health Check Lambda Function
+  HealthCheckFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${ApplicationName}-health-check"
+      Runtime: python3.9
+      Handler: index.handler
+      Role: !GetAtt AutomationRole.Arn
+      Timeout: 60
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          
+          cloudwatch = boto3.client('cloudwatch')
+          elbv2 = boto3.client('elbv2')
+          
+          def handler(event, context):
+              target_group = event['target_group']
+              threshold = event['threshold']
+              
+              try:
+                  # Check target group health
+                  response = elbv2.describe_target_health(
+                      TargetGroupArn=target_group
+                  )
+                  
+                  healthy_targets = sum(1 for target in response['TargetHealthDescriptions'] 
+                                      if target['TargetHealth']['State'] == 'healthy')
+                  total_targets = len(response['TargetHealthDescriptions'])
+                  
+                  # Check CloudWatch metrics for error rate
+                  error_response = cloudwatch.get_metric_statistics(
+                      Namespace='AWS/ApplicationELB',
+                      MetricName='HTTPCode_Target_5XX_Count',
+                      Dimensions=[
+                          {
+                              'Name': 'TargetGroup',
+                              'Value': target_group.split('/')[-1]
+                          }
+                      ],
+                      StartTime=datetime.utcnow() - timedelta(minutes=10),
+                      EndTime=datetime.utcnow(),
+                      Period=300,
+                      Statistics=['Sum']
+                  )
+                  
+                  error_count = sum(point['Sum'] for point in error_response['Datapoints'])
+                  
+                  # Health criteria
+                  health_criteria = {
+                      'healthy_targets': healthy_targets >= 1,
+                      'low_error_rate': error_count < 10,
+                      'target_availability': (healthy_targets / total_targets) >= 0.8 if total_targets > 0 else False
+                  }
+                  
+                  is_healthy = all(health_criteria.values())
+                  
+                  return {
+                      'healthy': is_healthy,
+                      'criteria': health_criteria,
+                      'healthy_targets': healthy_targets,
+                      'total_targets': total_targets,
+                      'error_count': error_count
+                  }
+                  
+              except Exception as e:
+                  print(f"Health check failed: {str(e)}")
+                  return {
+                      'healthy': False,
+                      'error': str(e)
+                  }
+
+  # IAM Role for Automation Functions
+  AutomationRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: CanaryAutomationPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                  - elasticloadbalancing:DescribeTargetHealth
+                  - elasticloadbalancing:DescribeListeners
+                  - elasticloadbalancing:ModifyListener
+                  - cloudwatch:GetMetricStatistics
+                  - cloudwatch:PutMetricData
+                Resource: "*"
+
+  # IAM Role for Step Functions
+  StepFunctionsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: states.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: StepFunctionsExecutionPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource: "*"
+
+  # SNS Subscriptions
+  RollbackSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref RollbackTopic
+      Protocol: lambda
+      Endpoint: !GetAtt RollbackFunction.Arn
+
+  PromotionSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref PromotionTopic
+      Protocol: lambda
+      Endpoint: !GetAtt PromotionFunction.Arn
+
+  # Lambda Permissions for SNS
+  RollbackFunctionPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref RollbackFunction
+      Action: lambda:InvokeFunction
+      Principal: sns.amazonaws.com
+      SourceArn: !Ref RollbackTopic
+
+  PromotionFunctionPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref PromotionFunction
+      Action: lambda:InvokeFunction
+      Principal: sns.amazonaws.com
+      SourceArn: !Ref PromotionTopic
+
+Outputs:
+  DashboardURL:
+    Description: CloudWatch Dashboard URL for canary monitoring
+    Value: !Sub "https://${AWS::Region}.console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#dashboards:name=${ApplicationName}-Canary-Dashboard"
+    Export:
+      Name: !Sub "${AWS::StackName}-DashboardURL"
+  
+  RollbackTopicArn:
+    Description: SNS Topic ARN for rollback notifications
+    Value: !Ref RollbackTopic
+    Export:
+      Name: !Sub "${AWS::StackName}-RollbackTopicArn"
+  
+  PromotionTopicArn:
+    Description: SNS Topic ARN for promotion notifications
+    Value: !Ref PromotionTopic
+    Export:
+      Name: !Sub "${AWS::StackName}-PromotionTopicArn"
+  
+  StateMachineArn:
+    Description: Step Functions state machine ARN for gradual promotion
+    Value: !Ref CanaryPromotionStateMachine
+    Export:
+      Name: !Sub "${AWS::StackName}-StateMachineArn"
+  
+  HealthCheckFunctionArn:
+    Description: Health check Lambda function ARN
+    Value: !GetAtt HealthCheckFunction.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-HealthCheckFunctionArn"

@@ -1,0 +1,526 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'ECS Rolling Deployment with Zero-Downtime Updates'
+
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC ID for the deployment
+  
+  SubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Subnet IDs for the ECS service
+  
+  ApplicationName:
+    Type: String
+    Description: Name of the application
+    Default: "rolling-demo-app"
+  
+  ImageUri:
+    Type: String
+    Description: Container image URI
+    Default: "nginx:1.20"
+  
+  DesiredCount:
+    Type: Number
+    Description: Desired number of tasks
+    Default: 4
+    MinValue: 2
+    MaxValue: 10
+
+Resources:
+  # ECS Cluster
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Sub "${ApplicationName}-cluster"
+      CapacityProviders:
+        - FARGATE
+      DefaultCapacityProviderStrategy:
+        - CapacityProvider: FARGATE
+          Weight: 1
+      ClusterSettings:
+        - Name: containerInsights
+          Value: enabled
+
+  # Application Load Balancer
+  ApplicationLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub "${ApplicationName}-alb"
+      Scheme: internet-facing
+      Type: application
+      Subnets: !Ref SubnetIds
+      SecurityGroups:
+        - !Ref ALBSecurityGroup
+      LoadBalancerAttributes:
+        - Key: idle_timeout.timeout_seconds
+          Value: "60"
+        - Key: routing.http2.enabled
+          Value: "true"
+
+  # ALB Security Group
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for ALB
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+          Description: "HTTP traffic from internet"
+        - IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          CidrIp: 0.0.0.0/0
+          Description: "Health check port"
+
+  # Target Group
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub "${ApplicationName}-tg"
+      Port: 80
+      Protocol: HTTP
+      VpcId: !Ref VpcId
+      TargetType: ip
+      HealthCheckPath: /health
+      HealthCheckProtocol: HTTP
+      HealthCheckIntervalSeconds: 30
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: "30"
+        - Key: stickiness.enabled
+          Value: "false"
+
+  # ALB Listener
+  ALBListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroup
+
+  # ECS Task Definition
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub "${ApplicationName}-task"
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      Cpu: 256
+      Memory: 512
+      ExecutionRoleArn: !Ref TaskExecutionRole
+      TaskRoleArn: !Ref TaskRole
+      ContainerDefinitions:
+        - Name: !Sub "${ApplicationName}-container"
+          Image: !Ref ImageUri
+          PortMappings:
+            - ContainerPort: 80
+              Protocol: tcp
+          Environment:
+            - Name: VERSION
+              Value: "1.0.0"
+            - Name: ENVIRONMENT
+              Value: "production"
+            - Name: DEPLOYMENT_TYPE
+              Value: "rolling"
+          HealthCheck:
+            Command:
+              - CMD-SHELL
+              - "curl -f http://localhost/health || exit 1"
+            Interval: 30
+            Timeout: 5
+            Retries: 3
+            StartPeriod: 60
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: ecs
+          Essential: true
+
+  # ECS Service with Rolling Deployment Configuration
+  ECSService:
+    Type: AWS::ECS::Service
+    DependsOn: ALBListener
+    Properties:
+      ServiceName: !Sub "${ApplicationName}-service"
+      Cluster: !Ref ECSCluster
+      TaskDefinition: !Ref TaskDefinition
+      DesiredCount: !Ref DesiredCount
+      LaunchType: FARGATE
+      PlatformVersion: LATEST
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          SecurityGroups:
+            - !Ref ECSSecurityGroup
+          Subnets: !Ref SubnetIds
+          AssignPublicIp: ENABLED
+      LoadBalancers:
+        - ContainerName: !Sub "${ApplicationName}-container"
+          ContainerPort: 80
+          TargetGroupArn: !Ref TargetGroup
+      DeploymentConfiguration:
+        MaximumPercent: 200
+        MinimumHealthyPercent: 50
+        DeploymentCircuitBreaker:
+          Enable: true
+          Rollback: true
+      ServiceTags:
+        - Key: DeploymentType
+          Value: Rolling
+        - Key: Application
+          Value: !Ref ApplicationName
+
+  # ECS Security Group
+  ECSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for ECS tasks
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          SourceSecurityGroupId: !Ref ALBSecurityGroup
+          Description: "HTTP traffic from ALB"
+
+  # Task Execution Role
+  TaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Policies:
+        - PolicyName: CloudWatchLogsPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/ecs/${ApplicationName}*"
+
+  # Task Role (for application permissions)
+  TaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CloudWatchMetricsPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - cloudwatch:PutMetricData
+                Resource: "*"
+
+  # CloudWatch Log Group
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/ecs/${ApplicationName}"
+      RetentionInDays: 7
+
+  # Lambda Function for Deployment Automation
+  DeploymentFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${ApplicationName}-deployment-automation"
+      Runtime: python3.9
+      Handler: index.handler
+      Role: !GetAtt DeploymentFunctionRole.Arn
+      Timeout: 300
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import time
+          
+          ecs = boto3.client('ecs')
+          cloudwatch = boto3.client('cloudwatch')
+          
+          def handler(event, context):
+              action = event.get('action')
+              cluster_name = event.get('cluster_name')
+              service_name = event.get('service_name')
+              
+              if action == 'update_service':
+                  return update_service(event, cluster_name, service_name)
+              elif action == 'monitor_deployment':
+                  return monitor_deployment(event, cluster_name, service_name)
+              elif action == 'rollback_deployment':
+                  return rollback_deployment(event, cluster_name, service_name)
+              else:
+                  return {
+                      'statusCode': 400,
+                      'body': json.dumps('Invalid action')
+                  }
+          
+          def update_service(event, cluster_name, service_name):
+              task_definition = event.get('task_definition')
+              desired_count = event.get('desired_count')
+              
+              try:
+                  response = ecs.update_service(
+                      cluster=cluster_name,
+                      service=service_name,
+                      taskDefinition=task_definition,
+                      desiredCount=desired_count if desired_count else None
+                  )
+                  
+                  return {
+                      'statusCode': 200,
+                      'body': json.dumps({
+                          'message': 'Service update initiated',
+                          'deployment_id': response['service']['deployments'][0]['id']
+                      })
+                  }
+              except Exception as e:
+                  return {
+                      'statusCode': 500,
+                      'body': json.dumps(f'Error updating service: {str(e)}')
+                  }
+          
+          def monitor_deployment(event, cluster_name, service_name):
+              try:
+                  response = ecs.describe_services(
+                      cluster=cluster_name,
+                      services=[service_name]
+                  )
+                  
+                  service = response['services'][0]
+                  deployments = service['deployments']
+                  
+                  primary_deployment = next((d for d in deployments if d['status'] == 'PRIMARY'), None)
+                  
+                  if not primary_deployment:
+                      return {
+                          'statusCode': 200,
+                          'body': json.dumps({
+                              'status': 'NO_PRIMARY_DEPLOYMENT',
+                              'message': 'No primary deployment found'
+                          })
+                      }
+                  
+                  deployment_status = {
+                      'deployment_id': primary_deployment['id'],
+                      'status': primary_deployment['status'],
+                      'running_count': primary_deployment['runningCount'],
+                      'pending_count': primary_deployment['pendingCount'],
+                      'desired_count': primary_deployment['desiredCount'],
+                      'rollout_state': primary_deployment.get('rolloutState', 'UNKNOWN')
+                  }
+                  
+                  # Put custom metrics
+                  cloudwatch.put_metric_data(
+                      Namespace=f'{service_name}/Deployment',
+                      MetricData=[
+                          {
+                              'MetricName': 'RunningTasks',
+                              'Value': primary_deployment['runningCount'],
+                              'Unit': 'Count'
+                          },
+                          {
+                              'MetricName': 'PendingTasks',
+                              'Value': primary_deployment['pendingCount'],
+                              'Unit': 'Count'
+                          }
+                      ]
+                  )
+                  
+                  return {
+                      'statusCode': 200,
+                      'body': json.dumps(deployment_status)
+                  }
+                  
+              except Exception as e:
+                  return {
+                      'statusCode': 500,
+                      'body': json.dumps(f'Error monitoring deployment: {str(e)}')
+                  }
+          
+          def rollback_deployment(event, cluster_name, service_name):
+              previous_task_definition = event.get('previous_task_definition')
+              
+              if not previous_task_definition:
+                  return {
+                      'statusCode': 400,
+                      'body': json.dumps('Previous task definition required for rollback')
+                  }
+              
+              try:
+                  response = ecs.update_service(
+                      cluster=cluster_name,
+                      service=service_name,
+                      taskDefinition=previous_task_definition
+                  )
+                  
+                  return {
+                      'statusCode': 200,
+                      'body': json.dumps({
+                          'message': 'Rollback initiated',
+                          'deployment_id': response['service']['deployments'][0]['id']
+                      })
+                  }
+              except Exception as e:
+                  return {
+                      'statusCode': 500,
+                      'body': json.dumps(f'Error during rollback: {str(e)}')
+                  }
+      Environment:
+        Variables:
+          CLUSTER_NAME: !Ref ECSCluster
+          SERVICE_NAME: !Sub "${ApplicationName}-service"
+
+  # IAM Role for Deployment Function
+  DeploymentFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: ECSDeploymentPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ecs:DescribeServices
+                  - ecs:UpdateService
+                  - ecs:DescribeTaskDefinition
+                  - ecs:RegisterTaskDefinition
+                  - cloudwatch:PutMetricData
+                Resource: "*"
+
+  # CloudWatch Alarms for Deployment Monitoring
+  HighCPUAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${ApplicationName}-HighCPU"
+      AlarmDescription: "High CPU utilization during deployment"
+      MetricName: CPUUtilization
+      Namespace: AWS/ECS
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 80
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: ServiceName
+          Value: !Sub "${ApplicationName}-service"
+        - Name: ClusterName
+          Value: !Ref ECSCluster
+      TreatMissingData: notBreaching
+
+  HighMemoryAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${ApplicationName}-HighMemory"
+      AlarmDescription: "High memory utilization during deployment"
+      MetricName: MemoryUtilization
+      Namespace: AWS/ECS
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 80
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: ServiceName
+          Value: !Sub "${ApplicationName}-service"
+        - Name: ClusterName
+          Value: !Ref ECSCluster
+      TreatMissingData: notBreaching
+
+  UnhealthyTargetsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${ApplicationName}-UnhealthyTargets"
+      AlarmDescription: "Unhealthy targets during deployment"
+      MetricName: UnHealthyHostCount
+      Namespace: AWS/ApplicationELB
+      Statistic: Average
+      Period: 60
+      EvaluationPeriods: 2
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Dimensions:
+        - Name: TargetGroup
+          Value: !GetAtt TargetGroup.TargetGroupFullName
+      TreatMissingData: notBreaching
+
+Outputs:
+  LoadBalancerDNS:
+    Description: DNS name of the load balancer
+    Value: !GetAtt ApplicationLoadBalancer.DNSName
+    Export:
+      Name: !Sub "${AWS::StackName}-LoadBalancerDNS"
+  
+  ApplicationURL:
+    Description: Application URL
+    Value: !Sub "http://${ApplicationLoadBalancer.DNSName}"
+    Export:
+      Name: !Sub "${AWS::StackName}-ApplicationURL"
+  
+  ECSCluster:
+    Description: ECS cluster name
+    Value: !Ref ECSCluster
+    Export:
+      Name: !Sub "${AWS::StackName}-ECSCluster"
+  
+  ECSService:
+    Description: ECS service name
+    Value: !Sub "${ApplicationName}-service"
+    Export:
+      Name: !Sub "${AWS::StackName}-ECSService"
+  
+  TaskDefinitionFamily:
+    Description: Task definition family
+    Value: !Sub "${ApplicationName}-task"
+    Export:
+      Name: !Sub "${AWS::StackName}-TaskDefinitionFamily"
+  
+  DeploymentFunctionArn:
+    Description: Deployment automation Lambda function ARN
+    Value: !GetAtt DeploymentFunction.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-DeploymentFunctionArn"
+  
+  TargetGroupArn:
+    Description: Target group ARN
+    Value: !Ref TargetGroup
+    Export:
+      Name: !Sub "${AWS::StackName}-TargetGroupArn"

@@ -1,0 +1,673 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Health Check and Availability Maintenance for Rolling Deployments'
+
+Parameters:
+  ApplicationName:
+    Type: String
+    Description: Name of the application
+    Default: "rolling-demo-app"
+  
+  LoadBalancerArn:
+    Type: String
+    Description: Application Load Balancer ARN
+  
+  TargetGroupArn:
+    Type: String
+    Description: Target Group ARN
+  
+  ECSClusterName:
+    Type: String
+    Description: ECS Cluster name (if applicable)
+    Default: ""
+  
+  ECSServiceName:
+    Type: String
+    Description: ECS Service name (if applicable)
+    Default: ""
+  
+  AutoScalingGroupName:
+    Type: String
+    Description: Auto Scaling Group name (if applicable)
+    Default: ""
+
+Conditions:
+  HasECSService: !Not [!Equals [!Ref ECSServiceName, ""]]
+  HasAutoScalingGroup: !Not [!Equals [!Ref AutoScalingGroupName, ""]]
+
+Resources:
+  # CloudWatch Dashboard for Health Monitoring
+  HealthDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub "${ApplicationName}-Health-Dashboard"
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "metric",
+              "x": 0,
+              "y": 0,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  [ "AWS/ApplicationELB", "TargetResponseTime", "LoadBalancer", "${LoadBalancerArn}" ],
+                  [ ".", "RequestCount", ".", "." ],
+                  [ ".", "HTTPCode_Target_2XX_Count", ".", "." ],
+                  [ ".", "HTTPCode_Target_4XX_Count", ".", "." ],
+                  [ ".", "HTTPCode_Target_5XX_Count", ".", "." ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "Load Balancer Metrics",
+                "period": 300
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12,
+              "y": 0,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  [ "AWS/ApplicationELB", "HealthyHostCount", "TargetGroup", "${TargetGroupArn}" ],
+                  [ ".", "UnHealthyHostCount", ".", "." ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "Target Health",
+                "period": 300
+              }
+            },
+            {
+              "type": "metric",
+              "x": 0,
+              "y": 6,
+              "width": 24,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  [ "${ApplicationName}/Health", "OverallHealthScore" ],
+                  [ ".", "AvailabilityPercentage" ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "Application Health Metrics",
+                "period": 300,
+                "yAxis": {
+                  "left": {
+                    "min": 0,
+                    "max": 100
+                  }
+                }
+              }
+            }
+          ]
+        }
+
+  # Lambda Function for Health Check Monitoring
+  HealthCheckFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${ApplicationName}-health-monitor"
+      Runtime: python3.9
+      Handler: index.handler
+      Role: !GetAtt HealthCheckRole.Arn
+      Timeout: 300
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import requests
+          import time
+          from datetime import datetime, timedelta
+          
+          elbv2 = boto3.client('elbv2')
+          cloudwatch = boto3.client('cloudwatch')
+          ecs = boto3.client('ecs')
+          autoscaling = boto3.client('autoscaling')
+          
+          def handler(event, context):
+              action = event.get('action', 'health_check')
+              
+              if action == 'health_check':
+                  return perform_health_check(event)
+              elif action == 'availability_check':
+                  return check_availability(event)
+              elif action == 'deployment_health':
+                  return monitor_deployment_health(event)
+              else:
+                  return {
+                      'statusCode': 400,
+                      'body': json.dumps('Invalid action')
+                  }
+          
+          def perform_health_check(event):
+              target_group_arn = event.get('target_group_arn')
+              load_balancer_dns = event.get('load_balancer_dns')
+              
+              try:
+                  # Check target group health
+                  tg_health = elbv2.describe_target_health(
+                      TargetGroupArn=target_group_arn
+                  )
+                  
+                  healthy_targets = 0
+                  unhealthy_targets = 0
+                  total_targets = len(tg_health['TargetHealthDescriptions'])
+                  
+                  target_details = []
+                  
+                  for target in tg_health['TargetHealthDescriptions']:
+                      target_info = {
+                          'target_id': target['Target']['Id'],
+                          'port': target['Target']['Port'],
+                          'health_state': target['TargetHealth']['State'],
+                          'reason': target['TargetHealth'].get('Reason', 'N/A')
+                      }
+                      target_details.append(target_info)
+                      
+                      if target['TargetHealth']['State'] == 'healthy':
+                          healthy_targets += 1
+                      else:
+                          unhealthy_targets += 1
+                  
+                  # Calculate health percentage
+                  health_percentage = (healthy_targets / total_targets * 100) if total_targets > 0 else 0
+                  
+                  # Perform application-level health check
+                  app_health_score = 0
+                  if load_balancer_dns:
+                      app_health_score = check_application_health(load_balancer_dns)
+                  
+                  # Send metrics to CloudWatch
+                  cloudwatch.put_metric_data(
+                      Namespace=f'{os.environ["APPLICATION_NAME"]}/Health',
+                      MetricData=[
+                          {
+                              'MetricName': 'HealthyTargets',
+                              'Value': healthy_targets,
+                              'Unit': 'Count'
+                          },
+                          {
+                              'MetricName': 'UnhealthyTargets',
+                              'Value': unhealthy_targets,
+                              'Unit': 'Count'
+                          },
+                          {
+                              'MetricName': 'HealthPercentage',
+                              'Value': health_percentage,
+                              'Unit': 'Percent'
+                          },
+                          {
+                              'MetricName': 'OverallHealthScore',
+                              'Value': app_health_score,
+                              'Unit': 'Percent'
+                          }
+                      ]
+                  )
+                  
+                  return {
+                      'statusCode': 200,
+                      'body': json.dumps({
+                          'healthy_targets': healthy_targets,
+                          'unhealthy_targets': unhealthy_targets,
+                          'total_targets': total_targets,
+                          'health_percentage': health_percentage,
+                          'app_health_score': app_health_score,
+                          'target_details': target_details
+                      })
+                  }
+                  
+              except Exception as e:
+                  return {
+                      'statusCode': 500,
+                      'body': json.dumps(f'Health check failed: {str(e)}')
+                  }
+          
+          def check_application_health(load_balancer_dns):
+              try:
+                  # Perform multiple health checks
+                  health_checks = []
+                  
+                  for i in range(5):
+                      start_time = time.time()
+                      response = requests.get(f'http://{load_balancer_dns}/health', timeout=10)
+                      response_time = (time.time() - start_time) * 1000
+                      
+                      health_checks.append({
+                          'status_code': response.status_code,
+                          'response_time': response_time,
+                          'success': response.status_code == 200
+                      })
+                      
+                      time.sleep(1)
+                  
+                  # Calculate health score
+                  successful_checks = sum(1 for check in health_checks if check['success'])
+                  avg_response_time = sum(check['response_time'] for check in health_checks) / len(health_checks)
+                  
+                  # Health score based on success rate and response time
+                  success_score = (successful_checks / len(health_checks)) * 100
+                  response_time_score = max(0, 100 - (avg_response_time / 10))  # Penalize slow responses
+                  
+                  overall_score = (success_score * 0.7) + (response_time_score * 0.3)
+                  
+                  return min(100, max(0, overall_score))
+                  
+              except Exception as e:
+                  print(f"Application health check failed: {str(e)}")
+                  return 0
+          
+          def check_availability(event):
+              target_group_arn = event.get('target_group_arn')
+              time_window_minutes = event.get('time_window_minutes', 60)
+              
+              try:
+                  end_time = datetime.utcnow()
+                  start_time = end_time - timedelta(minutes=time_window_minutes)
+                  
+                  # Get healthy host count metrics
+                  response = cloudwatch.get_metric_statistics(
+                      Namespace='AWS/ApplicationELB',
+                      MetricName='HealthyHostCount',
+                      Dimensions=[
+                          {
+                              'Name': 'TargetGroup',
+                              'Value': target_group_arn.split('/')[-1]
+                          }
+                      ],
+                      StartTime=start_time,
+                      EndTime=end_time,
+                      Period=300,
+                      Statistics=['Average']
+                  )
+                  
+                  if not response['Datapoints']:
+                      return {
+                          'statusCode': 200,
+                          'body': json.dumps({
+                              'availability_percentage': 0,
+                              'message': 'No data available'
+                          })
+                      }
+                  
+                  # Calculate availability percentage
+                  total_datapoints = len(response['Datapoints'])
+                  healthy_datapoints = sum(1 for dp in response['Datapoints'] if dp['Average'] > 0)
+                  
+                  availability_percentage = (healthy_datapoints / total_datapoints) * 100
+                  
+                  # Send availability metric
+                  cloudwatch.put_metric_data(
+                      Namespace=f'{os.environ["APPLICATION_NAME"]}/Health',
+                      MetricData=[
+                          {
+                              'MetricName': 'AvailabilityPercentage',
+                              'Value': availability_percentage,
+                              'Unit': 'Percent'
+                          }
+                      ]
+                  )
+                  
+                  return {
+                      'statusCode': 200,
+                      'body': json.dumps({
+                          'availability_percentage': availability_percentage,
+                          'time_window_minutes': time_window_minutes,
+                          'datapoints_analyzed': total_datapoints
+                      })
+                  }
+                  
+              except Exception as e:
+                  return {
+                      'statusCode': 500,
+                      'body': json.dumps(f'Availability check failed: {str(e)}')
+                  }
+          
+          def monitor_deployment_health(event):
+              cluster_name = event.get('cluster_name')
+              service_name = event.get('service_name')
+              asg_name = event.get('asg_name')
+              
+              try:
+                  deployment_health = {
+                      'deployment_type': 'unknown',
+                      'status': 'unknown',
+                      'health_score': 0
+                  }
+                  
+                  if cluster_name and service_name:
+                      # ECS deployment monitoring
+                      ecs_response = ecs.describe_services(
+                          cluster=cluster_name,
+                          services=[service_name]
+                      )
+                      
+                      if ecs_response['services']:
+                          service = ecs_response['services'][0]
+                          deployments = service['deployments']
+                          
+                          primary_deployment = next((d for d in deployments if d['status'] == 'PRIMARY'), None)
+                          
+                          if primary_deployment:
+                              deployment_health.update({
+                                  'deployment_type': 'ECS',
+                                  'status': primary_deployment['rolloutState'],
+                                  'running_count': primary_deployment['runningCount'],
+                                  'desired_count': primary_deployment['desiredCount'],
+                                  'health_score': (primary_deployment['runningCount'] / primary_deployment['desiredCount']) * 100
+                              })
+                  
+                  elif asg_name:
+                      # Auto Scaling Group deployment monitoring
+                      asg_response = autoscaling.describe_auto_scaling_groups(
+                          AutoScalingGroupNames=[asg_name]
+                      )
+                      
+                      if asg_response['AutoScalingGroups']:
+                          asg = asg_response['AutoScalingGroups'][0]
+                          
+                          in_service_instances = len([i for i in asg['Instances'] if i['LifecycleState'] == 'InService'])
+                          desired_capacity = asg['DesiredCapacity']
+                          
+                          deployment_health.update({
+                              'deployment_type': 'ASG',
+                              'status': 'STABLE' if in_service_instances == desired_capacity else 'UPDATING',
+                              'in_service_instances': in_service_instances,
+                              'desired_capacity': desired_capacity,
+                              'health_score': (in_service_instances / desired_capacity) * 100 if desired_capacity > 0 else 0
+                          })
+                  
+                  # Send deployment health metrics
+                  cloudwatch.put_metric_data(
+                      Namespace=f'{os.environ["APPLICATION_NAME"]}/Deployment',
+                      MetricData=[
+                          {
+                              'MetricName': 'DeploymentHealthScore',
+                              'Value': deployment_health['health_score'],
+                              'Unit': 'Percent'
+                          }
+                      ]
+                  )
+                  
+                  return {
+                      'statusCode': 200,
+                      'body': json.dumps(deployment_health)
+                  }
+                  
+              except Exception as e:
+                  return {
+                      'statusCode': 500,
+                      'body': json.dumps(f'Deployment health monitoring failed: {str(e)}')
+                  }
+      Environment:
+        Variables:
+          APPLICATION_NAME: !Ref ApplicationName
+
+  # IAM Role for Health Check Function
+  HealthCheckRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: HealthCheckPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - elasticloadbalancing:DescribeTargetHealth
+                  - elasticloadbalancing:DescribeLoadBalancers
+                  - cloudwatch:PutMetricData
+                  - cloudwatch:GetMetricStatistics
+                  - ecs:DescribeServices
+                  - autoscaling:DescribeAutoScalingGroups
+                Resource: "*"
+
+  # EventBridge Rule for Scheduled Health Checks
+  HealthCheckSchedule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "${ApplicationName}-health-check-schedule"
+      Description: "Scheduled health checks for rolling deployment"
+      ScheduleExpression: "rate(5 minutes)"
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt HealthCheckFunction.Arn
+          Id: "HealthCheckTarget"
+          Input: !Sub |
+            {
+              "action": "health_check",
+              "target_group_arn": "${TargetGroupArn}",
+              "load_balancer_dns": "${LoadBalancerArn}"
+            }
+
+  # Permission for EventBridge to invoke Lambda
+  HealthCheckPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref HealthCheckFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt HealthCheckSchedule.Arn
+
+  # CloudWatch Alarms for Health Monitoring
+  LowHealthPercentageAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${ApplicationName}-LowHealthPercentage"
+      AlarmDescription: "Health percentage is below threshold"
+      MetricName: HealthPercentage
+      Namespace: !Sub "${ApplicationName}/Health"
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 80
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: breaching
+      AlarmActions:
+        - !Ref HealthAlertTopic
+
+  LowAvailabilityAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${ApplicationName}-LowAvailability"
+      AlarmDescription: "Availability percentage is below threshold"
+      MetricName: AvailabilityPercentage
+      Namespace: !Sub "${ApplicationName}/Health"
+      Statistic: Average
+      Period: 900
+      EvaluationPeriods: 1
+      Threshold: 95
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: breaching
+      AlarmActions:
+        - !Ref HealthAlertTopic
+
+  UnhealthyTargetsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${ApplicationName}-UnhealthyTargets"
+      AlarmDescription: "Too many unhealthy targets"
+      MetricName: UnHealthyHostCount
+      Namespace: AWS/ApplicationELB
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Dimensions:
+        - Name: TargetGroup
+          Value: !Select [1, !Split ["/", !Ref TargetGroupArn]]
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref HealthAlertTopic
+
+  # SNS Topic for Health Alerts
+  HealthAlertTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub "${ApplicationName}-health-alerts"
+      DisplayName: "Health Alerts for Rolling Deployment"
+
+  # Lambda Function for Automated Recovery
+  RecoveryFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${ApplicationName}-auto-recovery"
+      Runtime: python3.9
+      Handler: index.handler
+      Role: !GetAtt RecoveryRole.Arn
+      Timeout: 300
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          
+          ecs = boto3.client('ecs')
+          autoscaling = boto3.client('autoscaling')
+          elbv2 = boto3.client('elbv2')
+          
+          def handler(event, context):
+              # Parse SNS message
+              for record in event['Records']:
+                  if record['EventSource'] == 'aws:sns':
+                      message = json.loads(record['Sns']['Message'])
+                      alarm_name = message['AlarmName']
+                      
+                      print(f"Processing alarm: {alarm_name}")
+                      
+                      if 'UnhealthyTargets' in alarm_name:
+                          return handle_unhealthy_targets(message)
+                      elif 'LowHealthPercentage' in alarm_name:
+                          return handle_low_health(message)
+                      elif 'LowAvailability' in alarm_name:
+                          return handle_low_availability(message)
+              
+              return {
+                  'statusCode': 200,
+                  'body': json.dumps('No action taken')
+              }
+          
+          def handle_unhealthy_targets(message):
+              # Implement recovery logic for unhealthy targets
+              print("Handling unhealthy targets...")
+              
+              # Could implement:
+              # - Restart unhealthy ECS tasks
+              # - Replace unhealthy EC2 instances
+              # - Scale up to compensate for unhealthy instances
+              
+              return {
+                  'statusCode': 200,
+                  'body': json.dumps('Unhealthy targets recovery initiated')
+              }
+          
+          def handle_low_health(message):
+              # Implement recovery logic for low health percentage
+              print("Handling low health percentage...")
+              
+              # Could implement:
+              # - Pause ongoing deployments
+              # - Scale up capacity
+              # - Trigger rollback
+              
+              return {
+                  'statusCode': 200,
+                  'body': json.dumps('Low health recovery initiated')
+              }
+          
+          def handle_low_availability(message):
+              # Implement recovery logic for low availability
+              print("Handling low availability...")
+              
+              # Could implement:
+              # - Emergency scaling
+              # - Circuit breaker activation
+              # - Failover to backup systems
+              
+              return {
+                  'statusCode': 200,
+                  'body': json.dumps('Low availability recovery initiated')
+              }
+
+  # IAM Role for Recovery Function
+  RecoveryRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: RecoveryPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ecs:*
+                  - autoscaling:*
+                  - elasticloadbalancing:*
+                  - cloudwatch:PutMetricData
+                Resource: "*"
+
+  # SNS Subscription for Recovery Function
+  RecoverySubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref HealthAlertTopic
+      Protocol: lambda
+      Endpoint: !GetAtt RecoveryFunction.Arn
+
+  # Lambda Permission for SNS
+  RecoveryPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref RecoveryFunction
+      Action: lambda:InvokeFunction
+      Principal: sns.amazonaws.com
+      SourceArn: !Ref HealthAlertTopic
+
+Outputs:
+  HealthDashboardURL:
+    Description: CloudWatch Dashboard URL for health monitoring
+    Value: !Sub "https://${AWS::Region}.console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#dashboards:name=${ApplicationName}-Health-Dashboard"
+    Export:
+      Name: !Sub "${AWS::StackName}-HealthDashboardURL"
+  
+  HealthCheckFunctionArn:
+    Description: Health check Lambda function ARN
+    Value: !GetAtt HealthCheckFunction.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-HealthCheckFunctionArn"
+  
+  RecoveryFunctionArn:
+    Description: Auto recovery Lambda function ARN
+    Value: !GetAtt RecoveryFunction.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-RecoveryFunctionArn"
+  
+  HealthAlertTopicArn:
+    Description: SNS Topic ARN for health alerts
+    Value: !Ref HealthAlertTopic
+    Export:
+      Name: !Sub "${AWS::StackName}-HealthAlertTopicArn"
