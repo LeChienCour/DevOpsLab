@@ -1,0 +1,599 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'ECS services integrated with AWS App Mesh for cross-service communication lab'
+
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC ID where services will be deployed
+  
+  PrivateSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Private subnet IDs for ECS services
+  
+  ClusterName:
+    Type: String
+    Default: cross-service-cluster
+    Description: Name of the ECS cluster
+  
+  MeshName:
+    Type: String
+    Description: Name of the App Mesh
+  
+  ServiceDiscoveryNamespaceId:
+    Type: String
+    Description: Service Discovery Namespace ID
+  
+  MessagingRoleArn:
+    Type: String
+    Description: ARN of the IAM role for messaging access
+
+Resources:
+  # ECS Cluster
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Ref ClusterName
+      CapacityProviders:
+        - FARGATE
+        - FARGATE_SPOT
+      DefaultCapacityProviderStrategy:
+        - CapacityProvider: FARGATE
+          Weight: 1
+        - CapacityProvider: FARGATE_SPOT
+          Weight: 4
+
+  # Security Groups
+  ServiceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for microservices
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          SourceSecurityGroupId: !Ref ServiceSecurityGroup
+          Description: Inter-service communication
+        - IpProtocol: tcp
+          FromPort: 15000
+          ToPort: 15001
+          SourceSecurityGroupId: !Ref ServiceSecurityGroup
+          Description: Envoy proxy admin and listener
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+          Description: All outbound traffic
+
+  # Application Load Balancer
+  ApplicationLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: cross-service-alb
+      Scheme: internal
+      Type: application
+      SecurityGroups:
+        - !Ref ALBSecurityGroup
+      Subnets: !Ref PrivateSubnetIds
+
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for Application Load Balancer
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 10.0.0.0/8
+          Description: HTTP from VPC
+        - IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          CidrIp: 10.0.0.0/8
+          Description: App port from VPC
+
+  # Target Groups
+  UserServiceTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: user-service-tg
+      Port: 8080
+      Protocol: HTTP
+      VpcId: !Ref VpcId
+      TargetType: ip
+      HealthCheckPath: /health
+      HealthCheckProtocol: HTTP
+      HealthCheckIntervalSeconds: 30
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+
+  OrderServiceTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: order-service-tg
+      Port: 8080
+      Protocol: HTTP
+      VpcId: !Ref VpcId
+      TargetType: ip
+      HealthCheckPath: /health
+      HealthCheckProtocol: HTTP
+      HealthCheckIntervalSeconds: 30
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+
+  # ALB Listeners
+  ALBListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - Type: fixed-response
+          FixedResponseConfig:
+            StatusCode: 404
+            ContentType: text/plain
+            MessageBody: Service not found
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Port: 8080
+      Protocol: HTTP
+
+  UserServiceListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref UserServiceTargetGroup
+      Conditions:
+        - Field: path-pattern
+          Values:
+            - /users*
+      ListenerArn: !Ref ALBListener
+      Priority: 100
+
+  OrderServiceListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref OrderServiceTargetGroup
+      Conditions:
+        - Field: path-pattern
+          Values:
+            - /orders*
+      ListenerArn: !Ref ALBListener
+      Priority: 200
+
+  # Task Definitions
+  UserServiceTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: user-service
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      Cpu: 512
+      Memory: 1024
+      ExecutionRoleArn: !Ref ECSTaskExecutionRole
+      TaskRoleArn: !Ref MessagingRoleArn
+      ProxyConfiguration:
+        Type: APPMESH
+        ContainerName: envoy
+        ProxyConfigurationProperties:
+          - Name: IgnoredUID
+            Value: '1337'
+          - Name: ProxyIngressPort
+            Value: '15000'
+          - Name: ProxyEgressPort
+            Value: '15001'
+          - Name: AppPorts
+            Value: '8080'
+          - Name: EgressIgnoredIPs
+            Value: '169.254.170.2,169.254.169.254'
+      ContainerDefinitions:
+        - Name: user-service
+          Image: public.ecr.aws/docker/library/node:16-alpine
+          Essential: true
+          PortMappings:
+            - ContainerPort: 8080
+              Protocol: tcp
+          Environment:
+            - Name: PORT
+              Value: '8080'
+            - Name: SERVICE_NAME
+              Value: user-service
+            - Name: MESH_NAME
+              Value: !Ref MeshName
+          Command:
+            - sh
+            - -c
+            - |
+              cat > app.js << 'EOF'
+              const express = require('express');
+              const app = express();
+              const port = process.env.PORT || 8080;
+              
+              app.use(express.json());
+              
+              // Health check endpoint
+              app.get('/health', (req, res) => {
+                res.json({ status: 'healthy', service: 'user-service', timestamp: new Date().toISOString() });
+              });
+              
+              // User endpoints
+              app.get('/users/:id', (req, res) => {
+                const userId = req.params.id;
+                res.json({
+                  id: userId,
+                  name: `User ${userId}`,
+                  email: `user${userId}@example.com`,
+                  created_at: new Date().toISOString()
+                });
+              });
+              
+              app.post('/users', (req, res) => {
+                const user = {
+                  id: Math.floor(Math.random() * 10000),
+                  ...req.body,
+                  created_at: new Date().toISOString()
+                };
+                res.status(201).json(user);
+              });
+              
+              app.listen(port, '0.0.0.0', () => {
+                console.log(`User service listening on port ${port}`);
+              });
+              EOF
+              
+              npm init -y && npm install express
+              node app.js
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref UserServiceLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: ecs
+          DependsOn:
+            - ContainerName: envoy
+              Condition: HEALTHY
+        - Name: envoy
+          Image: public.ecr.aws/appmesh/aws-appmesh-envoy:v1.22.2.0-prod
+          Essential: true
+          User: '1337'
+          HealthCheck:
+            Command:
+              - CMD-SHELL
+              - curl -s http://localhost:9901/server_info | grep state | grep -q LIVE
+            Interval: 5
+            Timeout: 2
+            Retries: 3
+            StartPeriod: 10
+          Environment:
+            - Name: APPMESH_VIRTUAL_NODE_NAME
+              Value: !Sub mesh/${MeshName}/virtualNode/user-node
+            - Name: ENABLE_ENVOY_XRAY_TRACING
+              Value: '1'
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref EnvoyLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: envoy-user
+        - Name: xray-daemon
+          Image: public.ecr.aws/xray/aws-xray-daemon:latest
+          Essential: false
+          PortMappings:
+            - ContainerPort: 2000
+              Protocol: udp
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref XRayLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: xray-user
+
+  OrderServiceTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: order-service
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      Cpu: 512
+      Memory: 1024
+      ExecutionRoleArn: !Ref ECSTaskExecutionRole
+      TaskRoleArn: !Ref MessagingRoleArn
+      ProxyConfiguration:
+        Type: APPMESH
+        ContainerName: envoy
+        ProxyConfigurationProperties:
+          - Name: IgnoredUID
+            Value: '1337'
+          - Name: ProxyIngressPort
+            Value: '15000'
+          - Name: ProxyEgressPort
+            Value: '15001'
+          - Name: AppPorts
+            Value: '8080'
+          - Name: EgressIgnoredIPs
+            Value: '169.254.170.2,169.254.169.254'
+      ContainerDefinitions:
+        - Name: order-service
+          Image: public.ecr.aws/docker/library/node:16-alpine
+          Essential: true
+          PortMappings:
+            - ContainerPort: 8080
+              Protocol: tcp
+          Environment:
+            - Name: PORT
+              Value: '8080'
+            - Name: SERVICE_NAME
+              Value: order-service
+            - Name: MESH_NAME
+              Value: !Ref MeshName
+            - Name: USER_SERVICE_URL
+              Value: http://user-service.cross-service.local:8080
+            - Name: INVENTORY_SERVICE_URL
+              Value: http://inventory-service.cross-service.local:8080
+          Command:
+            - sh
+            - -c
+            - |
+              cat > app.js << 'EOF'
+              const express = require('express');
+              const http = require('http');
+              const app = express();
+              const port = process.env.PORT || 8080;
+              
+              app.use(express.json());
+              
+              // Health check endpoint
+              app.get('/health', (req, res) => {
+                res.json({ status: 'healthy', service: 'order-service', timestamp: new Date().toISOString() });
+              });
+              
+              // Order endpoints
+              app.get('/orders/:id', (req, res) => {
+                const orderId = req.params.id;
+                res.json({
+                  id: orderId,
+                  user_id: Math.floor(Math.random() * 1000),
+                  items: [
+                    { product_id: 'prod-123', quantity: 2, price: 29.99 },
+                    { product_id: 'prod-456', quantity: 1, price: 49.99 }
+                  ],
+                  total: 109.97,
+                  status: 'processing',
+                  created_at: new Date().toISOString()
+                });
+              });
+              
+              app.post('/orders', async (req, res) => {
+                try {
+                  // Simulate calling user service to validate user
+                  const userResponse = await makeHttpRequest(
+                    process.env.USER_SERVICE_URL + '/users/' + req.body.user_id
+                  );
+                  
+                  // Simulate calling inventory service to check availability
+                  const inventoryResponse = await makeHttpRequest(
+                    process.env.INVENTORY_SERVICE_URL + '/inventory/check'
+                  );
+                  
+                  const order = {
+                    id: Math.floor(Math.random() * 10000),
+                    ...req.body,
+                    status: 'created',
+                    created_at: new Date().toISOString()
+                  };
+                  
+                  res.status(201).json(order);
+                } catch (error) {
+                  console.error('Error creating order:', error.message);
+                  res.status(500).json({ error: 'Failed to create order', details: error.message });
+                }
+              });
+              
+              function makeHttpRequest(url) {
+                return new Promise((resolve, reject) => {
+                  const request = http.get(url, (response) => {
+                    let data = '';
+                    response.on('data', (chunk) => data += chunk);
+                    response.on('end', () => {
+                      if (response.statusCode >= 200 && response.statusCode < 300) {
+                        resolve(JSON.parse(data));
+                      } else {
+                        reject(new Error(`HTTP ${response.statusCode}: ${data}`));
+                      }
+                    });
+                  });
+                  
+                  request.on('error', reject);
+                  request.setTimeout(5000, () => {
+                    request.destroy();
+                    reject(new Error('Request timeout'));
+                  });
+                });
+              }
+              
+              app.listen(port, '0.0.0.0', () => {
+                console.log(`Order service listening on port ${port}`);
+              });
+              EOF
+              
+              npm init -y && npm install express
+              node app.js
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref OrderServiceLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: ecs
+          DependsOn:
+            - ContainerName: envoy
+              Condition: HEALTHY
+        - Name: envoy
+          Image: public.ecr.aws/appmesh/aws-appmesh-envoy:v1.22.2.0-prod
+          Essential: true
+          User: '1337'
+          HealthCheck:
+            Command:
+              - CMD-SHELL
+              - curl -s http://localhost:9901/server_info | grep state | grep -q LIVE
+            Interval: 5
+            Timeout: 2
+            Retries: 3
+            StartPeriod: 10
+          Environment:
+            - Name: APPMESH_VIRTUAL_NODE_NAME
+              Value: !Sub mesh/${MeshName}/virtualNode/order-node
+            - Name: ENABLE_ENVOY_XRAY_TRACING
+              Value: '1'
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref EnvoyLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: envoy-order
+        - Name: xray-daemon
+          Image: public.ecr.aws/xray/aws-xray-daemon:latest
+          Essential: false
+          PortMappings:
+            - ContainerPort: 2000
+              Protocol: udp
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref XRayLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: xray-order
+
+  # ECS Services
+  UserService:
+    Type: AWS::ECS::Service
+    DependsOn: UserServiceListenerRule
+    Properties:
+      ServiceName: user-service
+      Cluster: !Ref ECSCluster
+      TaskDefinition: !Ref UserServiceTaskDefinition
+      DesiredCount: 2
+      LaunchType: FARGATE
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          SecurityGroups:
+            - !Ref ServiceSecurityGroup
+          Subnets: !Ref PrivateSubnetIds
+          AssignPublicIp: DISABLED
+      LoadBalancers:
+        - ContainerName: user-service
+          ContainerPort: 8080
+          TargetGroupArn: !Ref UserServiceTargetGroup
+      ServiceRegistries:
+        - RegistryArn: !Sub 
+          - arn:aws:servicediscovery:${AWS::Region}:${AWS::AccountId}:service/${ServiceId}
+          - ServiceId: !ImportValue 
+              Fn::Sub: ${AWS::StackName}-UserServiceId
+
+  OrderService:
+    Type: AWS::ECS::Service
+    DependsOn: OrderServiceListenerRule
+    Properties:
+      ServiceName: order-service
+      Cluster: !Ref ECSCluster
+      TaskDefinition: !Ref OrderServiceTaskDefinition
+      DesiredCount: 2
+      LaunchType: FARGATE
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          SecurityGroups:
+            - !Ref ServiceSecurityGroup
+          Subnets: !Ref PrivateSubnetIds
+          AssignPublicIp: DISABLED
+      LoadBalancers:
+        - ContainerName: order-service
+          ContainerPort: 8080
+          TargetGroupArn: !Ref OrderServiceTargetGroup
+      ServiceRegistries:
+        - RegistryArn: !Sub 
+          - arn:aws:servicediscovery:${AWS::Region}:${AWS::AccountId}:service/${ServiceId}
+          - ServiceId: !ImportValue 
+              Fn::Sub: ${AWS::StackName}-OrderServiceId
+
+  # IAM Roles
+  ECSTaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Policies:
+        - PolicyName: AppMeshEnvoyAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - appmesh:StreamAggregatedResources
+                Resource: '*'
+        - PolicyName: XRayAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - xray:PutTraceSegments
+                  - xray:PutTelemetryRecords
+                Resource: '*'
+
+  # CloudWatch Log Groups
+  UserServiceLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /ecs/user-service
+      RetentionInDays: 7
+
+  OrderServiceLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /ecs/order-service
+      RetentionInDays: 7
+
+  EnvoyLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /ecs/envoy
+      RetentionInDays: 7
+
+  XRayLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /ecs/xray
+      RetentionInDays: 7
+
+Outputs:
+  ClusterName:
+    Description: Name of the ECS cluster
+    Value: !Ref ECSCluster
+    Export:
+      Name: !Sub ${AWS::StackName}-ClusterName
+
+  LoadBalancerDNS:
+    Description: DNS name of the Application Load Balancer
+    Value: !GetAtt ApplicationLoadBalancer.DNSName
+    Export:
+      Name: !Sub ${AWS::StackName}-LoadBalancerDNS
+
+  UserServiceName:
+    Description: Name of the User ECS service
+    Value: !Ref UserService
+    Export:
+      Name: !Sub ${AWS::StackName}-UserServiceName
+
+  OrderServiceName:
+    Description: Name of the Order ECS service
+    Value: !Ref OrderService
+    Export:
+      Name: !Sub ${AWS::StackName}-OrderServiceName

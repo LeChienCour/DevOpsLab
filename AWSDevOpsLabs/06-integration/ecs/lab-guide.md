@@ -1,653 +1,323 @@
-# ECS Service Integration Lab Guide
+# ECS Orchestration Lab
 
-## Objective
-Learn how to implement ECS orchestration with service discovery, demonstrating how containerized applications can communicate with each other in a scalable and resilient manner using AWS ECS, Service Discovery, and Application Load Balancer.
+## Overview
 
-## Learning Outcomes
+This comprehensive lab demonstrates advanced ECS orchestration patterns including Cloud Map service discovery, Application Load Balancer integration, and sophisticated auto-scaling policies based on custom CloudWatch metrics. You'll learn how to build production-ready containerized applications with AWS ECS Fargate.
+
+## Learning Objectives
+
 By completing this lab, you will:
-- Deploy containerized applications using Amazon ECS with Fargate
-- Configure AWS Cloud Map for service discovery
-- Implement inter-service communication using service discovery
-- Set up Application Load Balancer for external access
-- Monitor service health and troubleshoot connectivity issues
+- Deploy ECS clusters with Fargate capacity providers
+- Implement Cloud Map service discovery for microservices communication
+- Configure Application Load Balancer with target groups and health checks
+- Set up advanced auto-scaling policies using multiple metrics
+- Create custom CloudWatch dashboards and alarms
+- Implement time-based and custom metric scaling logic
+- Monitor distributed applications with comprehensive observability
 
 ## Prerequisites
-- AWS Account with administrative access
-- Docker installed locally
-- Basic understanding of containerization and microservices
-- Familiarity with AWS networking concepts (VPC, subnets, security groups)
 
-### Required AWS Permissions
-Your AWS user/role needs the following permissions:
-- ECS: Full access for creating clusters, services, and task definitions
-- EC2: Full access for VPC, security groups, and load balancer management
-- IAM: CreateRole, AttachRolePolicy for ECS task and execution roles
-- CloudMap: Full access for service discovery configuration
-- Logs: CreateLogGroup, CreateLogStream for CloudWatch logging
-
-### Time to Complete
-Approximately 45-60 minutes
+- AWS CLI configured with appropriate permissions
+- Basic understanding of containerization and Docker
+- Familiarity with ECS, VPC, and Load Balancer concepts
+- Understanding of CloudWatch metrics and alarms
 
 ## Architecture Overview
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                        Internet                              │
-└─────────────────────┬───────────────────────────────────────┘
-                      │
-┌─────────────────────▼───────────────────────────────────────┐
-│              Application Load Balancer                      │
-└─────────────────────┬───────────────────────────────────────┘
-                      │
-┌─────────────────────▼───────────────────────────────────────┐
-│                   ECS Cluster                               │
-│  ┌─────────────────┐              ┌─────────────────┐       │
-│  │   Frontend      │◄────────────►│   Backend       │       │
-│  │   Service       │              │   Service       │       │
-│  │   (Port 80)     │              │   (Port 3000)   │       │
-│  └─────────────────┘              └─────────────────┘       │
-│           │                                │                │
-│           ▼                                ▼                │
-│  ┌─────────────────┐              ┌─────────────────┐       │
-│  │ Cloud Map       │              │ Cloud Map       │       │
-│  │ frontend.local  │              │ backend.local   │       │
-│  └─────────────────┘              └─────────────────┘       │
-└─────────────────────────────────────────────────────────────┘
-```
+The lab creates a complete ECS environment with:
+- VPC with public and private subnets across multiple AZs
+- ECS Fargate cluster with mixed capacity providers (Fargate + Spot)
+- Application Load Balancer for external traffic distribution
+- Cloud Map private DNS namespace for service discovery
+- Auto-scaling policies based on CPU, memory, and custom metrics
+- CloudWatch dashboards and custom Lambda-based scaling logic
 
-### Resources Created:
-- **ECS Cluster**: Fargate cluster for running containerized services
-- **ECS Services**: Frontend and backend services with auto-scaling
-- **Task Definitions**: Container specifications for each service
-- **Application Load Balancer**: External access point for the frontend
-- **Cloud Map Namespace**: Private DNS namespace for service discovery
-- **Security Groups**: Network access controls for services and load balancer
-- **IAM Roles**: Task execution and task roles for ECS services
+## Lab Components
+
+### Infrastructure Stack
+- **VPC and Networking**: Multi-AZ setup with NAT Gateway
+- **Security Groups**: Properly configured for ALB and ECS communication
+- **ECS Cluster**: Fargate-enabled with container insights
+- **Cloud Map**: Private DNS namespace for service discovery
+- **IAM Roles**: Task execution and task roles with appropriate permissions
+
+### Service Stack
+- **Task Definition**: Fargate-compatible with logging and health checks
+- **ECS Service**: With service discovery registration and ALB integration
+- **Target Group**: Health check configuration and deregistration delay
+- **Auto-scaling Target**: Configurable min/max capacity with multiple policies
+
+### Advanced Auto-scaling Stack
+- **Custom Metrics**: Log-based metrics for error count and latency
+- **Step Scaling**: Multi-threshold scaling for rapid response
+- **Target Tracking**: CPU, memory, and request-based scaling
+- **Custom Lambda**: Time-aware scaling logic for business hours
+- **CloudWatch Dashboard**: Comprehensive metrics visualization
 
 ## Lab Steps
 
-### Step 1: Create VPC and Networking Components
+### Step 1: Provision the Lab Environment
 
-1. **Create a VPC for the ECS cluster:**
-   ```bash
-   # Create VPC
-   aws ec2 create-vpc \
-     --cidr-block 10.0.0.0/16 \
-     --tag-specifications 'ResourceType=vpc,Tags=[{Key=Name,Value=ecs-integration-vpc}]'
-   ```
+Navigate to the ECS lab directory and run the provisioning script:
 
-2. **Create public and private subnets:**
-   ```bash
-   # Get VPC ID
-   VPC_ID=$(aws ec2 describe-vpcs \
-     --filters "Name=tag:Name,Values=ecs-integration-vpc" \
-     --query 'Vpcs[0].VpcId' --output text)
-   
-   # Create public subnet 1
-   aws ec2 create-subnet \
-     --vpc-id $VPC_ID \
-     --cidr-block 10.0.1.0/24 \
-     --availability-zone $(aws ec2 describe-availability-zones --query 'AvailabilityZones[0].ZoneName' --output text) \
-     --tag-specifications 'ResourceType=subnet,Tags=[{Key=Name,Value=ecs-public-subnet-1}]'
-   
-   # Create public subnet 2
-   aws ec2 create-subnet \
-     --vpc-id $VPC_ID \
-     --cidr-block 10.0.2.0/24 \
-     --availability-zone $(aws ec2 describe-availability-zones --query 'AvailabilityZones[1].ZoneName' --output text) \
-     --tag-specifications 'ResourceType=subnet,Tags=[{Key=Name,Value=ecs-public-subnet-2}]'
-   ```
+```bash
+cd AWSDevOpsLabs/06-integration/ecs
+./scripts/provision-ecs-lab.sh
+```
 
-3. **Create and attach Internet Gateway:**
-   ```bash
-   # Create Internet Gateway
-   aws ec2 create-internet-gateway \
-     --tag-specifications 'ResourceType=internet-gateway,Tags=[{Key=Name,Value=ecs-integration-igw}]'
-   
-   # Get IGW ID
-   IGW_ID=$(aws ec2 describe-internet-gateways \
-     --filters "Name=tag:Name,Values=ecs-integration-igw" \
-     --query 'InternetGateways[0].InternetGatewayId' --output text)
-   
-   # Attach IGW to VPC
-   aws ec2 attach-internet-gateway \
-     --internet-gateway-id $IGW_ID \
-     --vpc-id $VPC_ID
-   ```
+The script will deploy three CloudFormation stacks in sequence:
+1. **Infrastructure Stack**: VPC, ECS cluster, ALB, and foundational resources
+2. **Service Stack**: ECS service with Cloud Map integration and basic auto-scaling
+3. **Auto-scaling Stack**: Advanced metrics, custom scaling logic, and monitoring
 
-### Step 2: Configure Service Discovery
+### Step 2: Verify Service Discovery
 
-1. **Create Cloud Map namespace:**
-   ```bash
-   # Create private DNS namespace
-   aws servicediscovery create-private-dns-namespace \
-     --name "ecs-integration.local" \
-     --vpc $VPC_ID \
-     --description "Private namespace for ECS service discovery"
-   ```
+Test the Cloud Map service discovery functionality:
 
-2. **Verify namespace creation:**
-   ```bash
-   # List namespaces
-   aws servicediscovery list-namespaces
-   ```
-   
-   Expected output should show your namespace with status "SUCCESS".
+```bash
+# List service discovery namespaces
+aws servicediscovery list-namespaces
 
-### Step 3: Create ECS Cluster and IAM Roles
+# List services in the namespace
+aws servicediscovery list-services
 
-1. **Create ECS cluster:**
-   ```bash
-   # Create Fargate cluster
-   aws ecs create-cluster \
-     --cluster-name ecs-integration-cluster \
-     --capacity-providers FARGATE \
-     --default-capacity-provider-strategy capacityProvider=FARGATE,weight=1
-   ```
+# Get service discovery details
+aws servicediscovery get-service --id <service-id>
+```
 
-2. **Create IAM roles for ECS tasks:**
-   ```bash
-   # Create task execution role
-   aws iam create-role \
-     --role-name ecsTaskExecutionRole \
-     --assume-role-policy-document '{
-       "Version": "2012-10-17",
-       "Statement": [
-         {
-           "Effect": "Allow",
-           "Principal": {
-             "Service": "ecs-tasks.amazonaws.com"
-           },
-           "Action": "sts:AssumeRole"
-         }
-       ]
-     }'
-   
-   # Attach managed policy
-   aws iam attach-role-policy \
-     --role-name ecsTaskExecutionRole \
-     --policy-arn arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
-   ```
+### Step 3: Test Load Balancer Integration
 
-### Step 4: Create Security Groups
+Access your service through the Application Load Balancer:
 
-1. **Create security group for ALB:**
-   ```bash
-   # Create ALB security group
-   aws ec2 create-security-group \
-     --group-name ecs-alb-sg \
-     --description "Security group for ECS Application Load Balancer" \
-     --vpc-id $VPC_ID \
-     --tag-specifications 'ResourceType=security-group,Tags=[{Key=Name,Value=ecs-alb-sg}]'
-   
-   # Get ALB SG ID
-   ALB_SG_ID=$(aws ec2 describe-security-groups \
-     --filters "Name=group-name,Values=ecs-alb-sg" \
-     --query 'SecurityGroups[0].GroupId' --output text)
-   
-   # Allow HTTP traffic
-   aws ec2 authorize-security-group-ingress \
-     --group-id $ALB_SG_ID \
-     --protocol tcp \
-     --port 80 \
-     --cidr 0.0.0.0/0
-   ```
+```bash
+# Get the ALB DNS name from stack outputs
+ALB_DNS=$(aws cloudformation describe-stacks \
+  --stack-name ecs-lab-infrastructure \
+  --query 'Stacks[0].Outputs[?OutputKey==`ApplicationLoadBalancerDNS`].OutputValue' \
+  --output text)
 
-2. **Create security group for ECS services:**
-   ```bash
-   # Create ECS services security group
-   aws ec2 create-security-group \
-     --group-name ecs-services-sg \
-     --description "Security group for ECS services" \
-     --vpc-id $VPC_ID \
-     --tag-specifications 'ResourceType=security-group,Tags=[{Key=Name,Value=ecs-services-sg}]'
-   
-   # Get services SG ID
-   SERVICES_SG_ID=$(aws ec2 describe-security-groups \
-     --filters "Name=group-name,Values=ecs-services-sg" \
-     --query 'SecurityGroups[0].GroupId' --output text)
-   
-   # Allow traffic from ALB
-   aws ec2 authorize-security-group-ingress \
-     --group-id $SERVICES_SG_ID \
-     --protocol tcp \
-     --port 80 \
-     --source-group $ALB_SG_ID
-   
-   # Allow inter-service communication
-   aws ec2 authorize-security-group-ingress \
-     --group-id $SERVICES_SG_ID \
-     --protocol tcp \
-     --port 3000 \
-     --source-group $SERVICES_SG_ID
-   ```
+# Test the service endpoint
+curl http://$ALB_DNS/web-service
 
-### Step 5: Create Application Load Balancer
+# Check target group health
+aws elbv2 describe-target-health \
+  --target-group-arn <target-group-arn>
+```
 
-1. **Create Application Load Balancer:**
-   ```bash
-   # Get subnet IDs
-   SUBNET_1_ID=$(aws ec2 describe-subnets \
-     --filters "Name=tag:Name,Values=ecs-public-subnet-1" \
-     --query 'Subnets[0].SubnetId' --output text)
-   
-   SUBNET_2_ID=$(aws ec2 describe-subnets \
-     --filters "Name=tag:Name,Values=ecs-public-subnet-2" \
-     --query 'Subnets[0].SubnetId' --output text)
-   
-   # Create ALB
-   aws elbv2 create-load-balancer \
-     --name ecs-integration-alb \
-     --subnets $SUBNET_1_ID $SUBNET_2_ID \
-     --security-groups $ALB_SG_ID \
-     --scheme internet-facing \
-     --type application
-   ```
+### Step 4: Monitor Auto-scaling Behavior
 
-2. **Create target group:**
-   ```bash
-   # Create target group for frontend service
-   aws elbv2 create-target-group \
-     --name ecs-frontend-tg \
-     --protocol HTTP \
-     --port 80 \
-     --vpc-id $VPC_ID \
-     --target-type ip \
-     --health-check-path /health
-   ```
+Generate load to trigger auto-scaling policies:
 
-### Step 6: Deploy Backend Service
+```bash
+# Install Apache Bench for load testing
+# On Amazon Linux/CentOS: sudo yum install httpd-tools
+# On Ubuntu/Debian: sudo apt-get install apache2-utils
 
-1. **Create backend task definition:**
-   ```bash
-   # Create backend task definition
-   cat > backend-task-def.json << EOF
-   {
-     "family": "backend-service",
-     "networkMode": "awsvpc",
-     "requiresCompatibilities": ["FARGATE"],
-     "cpu": "256",
-     "memory": "512",
-     "executionRoleArn": "arn:aws:iam::$(aws sts get-caller-identity --query Account --output text):role/ecsTaskExecutionRole",
-     "containerDefinitions": [
-       {
-         "name": "backend",
-         "image": "nginx:alpine",
-         "portMappings": [
-           {
-             "containerPort": 3000,
-             "protocol": "tcp"
-           }
-         ],
-         "essential": true,
-         "logConfiguration": {
-           "logDriver": "awslogs",
-           "options": {
-             "awslogs-group": "/ecs/backend-service",
-             "awslogs-region": "$(aws configure get region)",
-             "awslogs-stream-prefix": "ecs"
-           }
-         },
-         "command": [
-           "sh", "-c",
-           "echo 'server { listen 3000; location / { return 200 \"Backend Service Running\"; add_header Content-Type text/plain; } location /health { return 200 \"OK\"; add_header Content-Type text/plain; } }' > /etc/nginx/conf.d/default.conf && nginx -g 'daemon off;'"
-         ]
-       }
-     ]
-   }
-   EOF
-   
-   # Register task definition
-   aws ecs register-task-definition --cli-input-json file://backend-task-def.json
-   ```
+# Generate sustained load
+ab -n 10000 -c 50 -t 300 http://$ALB_DNS/web-service/
 
-2. **Create CloudWatch log group:**
-   ```bash
-   # Create log group for backend
-   aws logs create-log-group --log-group-name /ecs/backend-service
-   ```
+# Monitor scaling activity
+aws ecs describe-services \
+  --cluster devops-lab-cluster \
+  --services web-service \
+  --query 'services[0].{DesiredCount:desiredCount,RunningCount:runningCount,PendingCount:pendingCount}'
 
-3. **Create backend service with service discovery:**
-   ```bash
-   # Get namespace ID
-   NAMESPACE_ID=$(aws servicediscovery list-namespaces \
-     --filters Name=NAME,Values=ecs-integration.local \
-     --query 'Namespaces[0].Id' --output text)
-   
-   # Create service discovery service for backend
-   aws servicediscovery create-service \
-     --name backend \
-     --dns-config NamespaceId=$NAMESPACE_ID,DnsRecords=[{Type=A,TTL=60}] \
-     --health-check-custom-config FailureThreshold=1
-   
-   # Get service discovery service ID
-   BACKEND_SD_ID=$(aws servicediscovery list-services \
-     --filters Name=NAMESPACE_ID,Values=$NAMESPACE_ID \
-     --query 'Services[?Name==`backend`].Id' --output text)
-   
-   # Create ECS service
-   aws ecs create-service \
-     --cluster ecs-integration-cluster \
-     --service-name backend-service \
-     --task-definition backend-service \
-     --desired-count 2 \
-     --launch-type FARGATE \
-     --network-configuration "awsvpcConfiguration={subnets=[$SUBNET_1_ID,$SUBNET_2_ID],securityGroups=[$SERVICES_SG_ID],assignPublicIp=ENABLED}" \
-     --service-registries registryArn=arn:aws:servicediscovery:$(aws configure get region):$(aws sts get-caller-identity --query Account --output text):service/$BACKEND_SD_ID
-   ```
+# Check auto-scaling activities
+aws application-autoscaling describe-scaling-activities \
+  --service-namespace ecs \
+  --resource-id service/devops-lab-cluster/web-service
+```
 
-### Step 7: Deploy Frontend Service
+### Step 5: Explore Custom Metrics and Scaling
 
-1. **Create frontend task definition:**
-   ```bash
-   # Create frontend task definition
-   cat > frontend-task-def.json << EOF
-   {
-     "family": "frontend-service",
-     "networkMode": "awsvpc",
-     "requiresCompatibilities": ["FARGATE"],
-     "cpu": "256",
-     "memory": "512",
-     "executionRoleArn": "arn:aws:iam::$(aws sts get-caller-identity --query Account --output text):role/ecsTaskExecutionRole",
-     "containerDefinitions": [
-       {
-         "name": "frontend",
-         "image": "nginx:alpine",
-         "portMappings": [
-           {
-             "containerPort": 80,
-             "protocol": "tcp"
-           }
-         ],
-         "essential": true,
-         "logConfiguration": {
-           "logDriver": "awslogs",
-           "options": {
-             "awslogs-group": "/ecs/frontend-service",
-             "awslogs-region": "$(aws configure get region)",
-             "awslogs-stream-prefix": "ecs"
-           }
-         },
-         "command": [
-           "sh", "-c",
-           "echo 'server { listen 80; location / { proxy_pass http://backend.ecs-integration.local:3000; proxy_set_header Host \\$host; proxy_set_header X-Real-IP \\$remote_addr; } location /health { return 200 \"Frontend OK\"; add_header Content-Type text/plain; } }' > /etc/nginx/conf.d/default.conf && nginx -g 'daemon off;'"
-         ]
-       }
-     ]
-   }
-   EOF
-   
-   # Register task definition
-   aws ecs register-task-definition --cli-input-json file://frontend-task-def.json
-   ```
+View the custom CloudWatch dashboard:
 
-2. **Create log group and service discovery for frontend:**
-   ```bash
-   # Create log group for frontend
-   aws logs create-log-group --log-group-name /ecs/frontend-service
-   
-   # Create service discovery service for frontend
-   aws servicediscovery create-service \
-     --name frontend \
-     --dns-config NamespaceId=$NAMESPACE_ID,DnsRecords=[{Type=A,TTL=60}] \
-     --health-check-custom-config FailureThreshold=1
-   
-   # Get frontend service discovery ID
-   FRONTEND_SD_ID=$(aws servicediscovery list-services \
-     --filters Name=NAMESPACE_ID,Values=$NAMESPACE_ID \
-     --query 'Services[?Name==`frontend`].Id' --output text)
-   ```
+```bash
+# Get dashboard URL from stack outputs
+DASHBOARD_URL=$(aws cloudformation describe-stacks \
+  --stack-name ecs-lab-autoscaling \
+  --query 'Stacks[0].Outputs[?OutputKey==`DashboardURL`].OutputValue' \
+  --output text)
 
-3. **Create frontend ECS service and configure load balancer:**
-   ```bash
-   # Get target group ARN
-   TARGET_GROUP_ARN=$(aws elbv2 describe-target-groups \
-     --names ecs-frontend-tg \
-     --query 'TargetGroups[0].TargetGroupArn' --output text)
-   
-   # Create frontend service
-   aws ecs create-service \
-     --cluster ecs-integration-cluster \
-     --service-name frontend-service \
-     --task-definition frontend-service \
-     --desired-count 2 \
-     --launch-type FARGATE \
-     --network-configuration "awsvpcConfiguration={subnets=[$SUBNET_1_ID,$SUBNET_2_ID],securityGroups=[$SERVICES_SG_ID],assignPublicIp=ENABLED}" \
-     --load-balancers targetGroupArn=$TARGET_GROUP_ARN,containerName=frontend,containerPort=80 \
-     --service-registries registryArn=arn:aws:servicediscovery:$(aws configure get region):$(aws sts get-caller-identity --query Account --output text):service/$FRONTEND_SD_ID
-   
-   # Get ALB ARN and create listener
-   ALB_ARN=$(aws elbv2 describe-load-balancers \
-     --names ecs-integration-alb \
-     --query 'LoadBalancers[0].LoadBalancerArn' --output text)
-   
-   aws elbv2 create-listener \
-     --load-balancer-arn $ALB_ARN \
-     --protocol HTTP \
-     --port 80 \
-     --default-actions Type=forward,TargetGroupArn=$TARGET_GROUP_ARN
-   ```
+echo "Dashboard URL: $DASHBOARD_URL"
+```
 
-### Step 8: Test Service Integration
+Test custom scaling logic by examining the Lambda function:
 
-1. **Wait for services to stabilize:**
-   ```bash
-   # Check service status
-   aws ecs describe-services \
-     --cluster ecs-integration-cluster \
-     --services backend-service frontend-service \
-     --query 'services[*].[serviceName,runningCount,desiredCount]' \
-     --output table
-   ```
+```bash
+# View Lambda function logs
+aws logs describe-log-groups --log-group-name-prefix "/aws/lambda/web-service-custom-scaling"
 
-2. **Get ALB DNS name and test:**
-   ```bash
-   # Get ALB DNS name
-   ALB_DNS=$(aws elbv2 describe-load-balancers \
-     --names ecs-integration-alb \
-     --query 'LoadBalancers[0].DNSName' --output text)
-   
-   echo "ALB DNS: http://$ALB_DNS"
-   
-   # Test the application
-   curl http://$ALB_DNS
-   ```
-   
-   Expected output: "Backend Service Running" (proxied through frontend)
+# Manually invoke the custom scaling function
+aws lambda invoke \
+  --function-name web-service-custom-scaling \
+  --payload '{}' \
+  response.json && cat response.json
+```
 
-3. **Verify service discovery:**
-   ```bash
-   # List discovered services
-   aws servicediscovery list-instances \
-     --service-id $BACKEND_SD_ID
-   
-   aws servicediscovery list-instances \
-     --service-id $FRONTEND_SD_ID
-   ```
+### Step 6: Service Discovery Testing
+
+Deploy a second service to test inter-service communication:
+
+```bash
+# Create a simple client task definition
+cat > client-task.json << EOF
+{
+  "family": "client-service",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "256",
+  "memory": "512",
+  "executionRoleArn": "$(aws cloudformation describe-stacks --stack-name ecs-lab-infrastructure --query 'Stacks[0].Outputs[?OutputKey==`ECSTaskExecutionRoleArn`].OutputValue' --output text)",
+  "containerDefinitions": [
+    {
+      "name": "client",
+      "image": "alpine:latest",
+      "command": ["sh", "-c", "while true; do nslookup web-service.devops-lab.local && sleep 30; done"],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/client-service",
+          "awslogs-region": "us-east-1",
+          "awslogs-stream-prefix": "ecs"
+        }
+      }
+    }
+  ]
+}
+EOF
+
+# Register the task definition
+aws ecs register-task-definition --cli-input-json file://client-task.json
+
+# Run the client task
+aws ecs run-task \
+  --cluster devops-lab-cluster \
+  --task-definition client-service \
+  --launch-type FARGATE \
+  --network-configuration "awsvpcConfiguration={subnets=[$(aws cloudformation describe-stacks --stack-name ecs-lab-infrastructure --query 'Stacks[0].Outputs[?OutputKey==`PrivateSubnet1Id`].OutputValue' --output text)],securityGroups=[$(aws cloudformation describe-stacks --stack-name ecs-lab-infrastructure --query 'Stacks[0].Outputs[?OutputKey==`ECSSecurityGroupId`].OutputValue' --output text)]}"
+```
+
+### Step 7: Advanced Monitoring and Troubleshooting
+
+Explore ECS service metrics and logs:
+
+```bash
+# View service events
+aws ecs describe-services \
+  --cluster devops-lab-cluster \
+  --services web-service \
+  --query 'services[0].events[0:5]'
+
+# Check task health
+aws ecs list-tasks --cluster devops-lab-cluster --service-name web-service
+
+# View container logs
+TASK_ARN=$(aws ecs list-tasks --cluster devops-lab-cluster --service-name web-service --query 'taskArns[0]' --output text)
+aws logs get-log-events \
+  --log-group-name "/ecs/web-service" \
+  --log-stream-name "ecs/web-service/$(echo $TASK_ARN | cut -d'/' -f3)"
+
+# Monitor CloudWatch metrics
+aws cloudwatch get-metric-statistics \
+  --namespace AWS/ECS \
+  --metric-name CPUUtilization \
+  --dimensions Name=ServiceName,Value=web-service Name=ClusterName,Value=devops-lab-cluster \
+  --start-time $(date -u -d '1 hour ago' +%Y-%m-%dT%H:%M:%S) \
+  --end-time $(date -u +%Y-%m-%dT%H:%M:%S) \
+  --period 300 \
+  --statistics Average
+```
+
+## Key Concepts Demonstrated
+
+### 1. Cloud Map Service Discovery
+- Private DNS namespace creation and management
+- Automatic service registration and deregistration
+- DNS-based service discovery for microservices
+
+### 2. Application Load Balancer Integration
+- Target group configuration with health checks
+- Path-based routing for multiple services
+- Connection draining and deregistration delays
+
+### 3. Advanced Auto-scaling Strategies
+- **Target Tracking**: Maintains target CPU/memory utilization
+- **Step Scaling**: Multi-threshold scaling for rapid response
+- **Custom Metrics**: Application-specific scaling triggers
+- **Time-based Scaling**: Business hours vs. off-hours capacity
+
+### 4. Comprehensive Monitoring
+- CloudWatch dashboards with multiple metric sources
+- Custom log-based metrics extraction
+- Composite alarms for complex scaling logic
+- SNS notifications for scaling events
+
+### 5. Production Best Practices
+- Multi-AZ deployment for high availability
+- Proper security group configuration
+- IAM roles with least-privilege access
+- Container insights for enhanced monitoring
+- Circuit breaker patterns with deployment configuration
 
 ## Troubleshooting Guide
 
 ### Common Issues and Solutions
 
-1. **Services not starting or staying in PENDING state:**
-   - Check security group rules allow required ports
-   - Verify subnets have internet access for image pulling
-   - Check IAM role permissions for task execution
+**Service fails to start:**
+- Check task definition resource requirements
+- Verify security group allows ALB communication
+- Ensure subnets have internet access via NAT Gateway
 
-2. **Service discovery not working:**
-   - Verify Cloud Map namespace is in the same VPC as ECS services
-   - Check that service discovery services are properly registered
-   - Ensure DNS resolution is working within the VPC
+**Auto-scaling not working:**
+- Verify CloudWatch agent is publishing metrics
+- Check scaling policy thresholds and cooldown periods
+- Ensure service has proper IAM permissions
 
-3. **Load balancer health checks failing:**
-   - Verify target group health check path matches application endpoint
-   - Check security group allows traffic from ALB to ECS services
-   - Ensure application is listening on the correct port
+**Service discovery resolution fails:**
+- Confirm Cloud Map namespace and service creation
+- Check VPC DNS resolution and hostnames are enabled
+- Verify tasks are registering with service discovery
 
-### Debugging Commands
+**Load balancer health checks failing:**
+- Review target group health check configuration
+- Check application health check endpoint
+- Verify security group allows health check traffic
 
-```bash
-# Check ECS service events
-aws ecs describe-services \
-  --cluster ecs-integration-cluster \
-  --services frontend-service backend-service \
-  --query 'services[*].events[0:5]'
+## Cost Optimization Tips
 
-# Check task status and logs
-aws ecs list-tasks --cluster ecs-integration-cluster --service-name backend-service
-aws logs get-log-events \
-  --log-group-name /ecs/backend-service \
-  --log-stream-name ecs/backend/$(aws ecs list-tasks --cluster ecs-integration-cluster --service-name backend-service --query 'taskArns[0]' --output text | cut -d'/' -f3)
-
-# Check target group health
-aws elbv2 describe-target-health --target-group-arn $TARGET_GROUP_ARN
-```
-
-## Resources Created
-
-This lab creates the following AWS resources:
-
-### Compute
-- **ECS Cluster**: Fargate cluster for container orchestration
-- **ECS Services**: Frontend and backend services with auto-scaling
-- **ECS Task Definitions**: Container specifications and configurations
-
-### Networking
-- **VPC**: Virtual private cloud with public subnets
-- **Application Load Balancer**: External access point for frontend service
-- **Security Groups**: Network access controls for ALB and ECS services
-- **Internet Gateway**: Internet access for public subnets
-
-### Service Discovery
-- **Cloud Map Namespace**: Private DNS namespace for service discovery
-- **Service Discovery Services**: DNS records for frontend and backend services
-
-### Monitoring
-- **CloudWatch Log Groups**: Container logs for both services
-
-### Estimated Costs
-- ECS Fargate: ~$0.04048/vCPU/hour + $0.004445/GB/hour (4 tasks total)
-- Application Load Balancer: $0.0225/hour + $0.008/LCU-hour
-- Cloud Map: $0.50/hosted zone/month + $0.40/million queries
-- CloudWatch Logs: $0.50/GB ingested + $0.03/GB stored
-- **Total estimated cost**: $2-5/day (not free tier eligible for ALB)
+1. **Use Fargate Spot**: Configured in the infrastructure template for cost savings
+2. **Right-size Resources**: Monitor CPU/memory utilization and adjust task definitions
+3. **Optimize Scaling**: Set appropriate min/max values and scaling thresholds
+4. **Log Retention**: Configure appropriate CloudWatch log retention periods
+5. **Resource Cleanup**: Always run cleanup script when lab is complete
 
 ## Cleanup
 
-When you're finished with the lab, follow these steps to avoid ongoing charges:
+When you're finished with the lab, clean up all resources to avoid ongoing charges:
 
-1. **Delete ECS services:**
-   ```bash
-   # Scale down services to 0
-   aws ecs update-service \
-     --cluster ecs-integration-cluster \
-     --service frontend-service \
-     --desired-count 0
-   
-   aws ecs update-service \
-     --cluster ecs-integration-cluster \
-     --service backend-service \
-     --desired-count 0
-   
-   # Delete services
-   aws ecs delete-service \
-     --cluster ecs-integration-cluster \
-     --service frontend-service
-   
-   aws ecs delete-service \
-     --cluster ecs-integration-cluster \
-     --service backend-service
-   ```
+```bash
+./scripts/cleanup-ecs-lab.sh
+```
 
-2. **Delete load balancer and target groups:**
-   ```bash
-   # Delete listener
-   LISTENER_ARN=$(aws elbv2 describe-listeners \
-     --load-balancer-arn $ALB_ARN \
-     --query 'Listeners[0].ListenerArn' --output text)
-   aws elbv2 delete-listener --listener-arn $LISTENER_ARN
-   
-   # Delete load balancer
-   aws elbv2 delete-load-balancer --load-balancer-arn $ALB_ARN
-   
-   # Delete target group
-   aws elbv2 delete-target-group --target-group-arn $TARGET_GROUP_ARN
-   ```
-
-3. **Clean up service discovery:**
-   ```bash
-   # Delete service discovery services
-   aws servicediscovery delete-service --id $FRONTEND_SD_ID
-   aws servicediscovery delete-service --id $BACKEND_SD_ID
-   
-   # Delete namespace
-   aws servicediscovery delete-namespace --id $NAMESPACE_ID
-   ```
-
-4. **Delete ECS cluster and related resources:**
-   ```bash
-   # Delete cluster
-   aws ecs delete-cluster --cluster ecs-integration-cluster
-   
-   # Delete log groups
-   aws logs delete-log-group --log-group-name /ecs/frontend-service
-   aws logs delete-log-group --log-group-name /ecs/backend-service
-   
-   # Delete task definitions (deregister)
-   aws ecs deregister-task-definition --task-definition frontend-service:1
-   aws ecs deregister-task-definition --task-definition backend-service:1
-   ```
-
-5. **Delete networking components:**
-   ```bash
-   # Delete security groups
-   aws ec2 delete-security-group --group-id $SERVICES_SG_ID
-   aws ec2 delete-security-group --group-id $ALB_SG_ID
-   
-   # Detach and delete internet gateway
-   aws ec2 detach-internet-gateway --internet-gateway-id $IGW_ID --vpc-id $VPC_ID
-   aws ec2 delete-internet-gateway --internet-gateway-id $IGW_ID
-   
-   # Delete subnets
-   aws ec2 delete-subnet --subnet-id $SUBNET_1_ID
-   aws ec2 delete-subnet --subnet-id $SUBNET_2_ID
-   
-   # Delete VPC
-   aws ec2 delete-vpc --vpc-id $VPC_ID
-   ```
-
-> **Important**: Failure to delete resources may result in unexpected charges to your AWS account.
+The cleanup script will:
+- Delete all CloudFormation stacks in proper order
+- Remove CloudWatch dashboards and custom metrics
+- Clean up Service Discovery resources
+- Verify no orphaned resources remain
 
 ## Next Steps
 
-After completing this lab, consider:
-
-1. **Implement auto-scaling policies** for ECS services based on CPU/memory metrics
-2. **Add SSL/TLS termination** at the Application Load Balancer level
-3. **Explore ECS Service Connect** as an alternative to Cloud Map for service discovery
-4. **Implement blue-green deployments** using ECS and CodeDeploy
-5. **Add monitoring and alerting** using CloudWatch and SNS
-
-## Certification Exam Tips
-
-This lab covers several key areas for the AWS DevOps Professional exam:
-
-- **Domain 1**: SDLC Automation (Container orchestration, service discovery)
-- **Domain 2**: Configuration Management and IaC (ECS task definitions, service configuration)
-- **Domain 3**: Monitoring and Logging (CloudWatch integration, application monitoring)
-- **Domain 4**: Policies and Standards Automation (Security groups, IAM roles)
-
-Key concepts to remember:
-- ECS Fargate eliminates the need to manage EC2 instances for containers
-- Service discovery enables dynamic service-to-service communication
-- Application Load Balancers provide Layer 7 routing and health checking
-- Security groups act as virtual firewalls for ECS tasks
-- Task definitions define container specifications and resource requirements
+After completing this lab, consider exploring:
+- ECS with AWS App Mesh for advanced service mesh capabilities
+- Integration with AWS X-Ray for distributed tracing
+- CI/CD pipelines with ECS deployments using CodePipeline
+- Multi-region ECS deployments with Route 53 health checks
+- ECS with AWS Batch for batch processing workloads
 
 ## Additional Resources
 
 - [Amazon ECS Developer Guide](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/)
 - [AWS Cloud Map Developer Guide](https://docs.aws.amazon.com/cloud-map/latest/dg/)
-- [Application Load Balancer User Guide](https://docs.aws.amazon.com/elasticloadbalancing/latest/application/)
-- [ECS Best Practices Guide](https://docs.aws.amazon.com/AmazonECS/latest/bestpracticesguide/)
-- [Microservices on AWS](https://docs.aws.amazon.com/whitepapers/latest/microservices-on-aws/microservices-on-aws.html)
+- [Application Auto Scaling User Guide](https://docs.aws.amazon.com/autoscaling/application/userguide/)
+- [Amazon ECS Best Practices Guide](https://docs.aws.amazon.com/AmazonECS/latest/bestpracticesguide/)

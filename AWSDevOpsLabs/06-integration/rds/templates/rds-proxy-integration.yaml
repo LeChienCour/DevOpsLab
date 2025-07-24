@@ -1,0 +1,575 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'RDS Proxy configuration for serverless database connections with Lambda functions'
+
+Parameters:
+  InfrastructureStackName:
+    Type: String
+    Description: 'Name of the infrastructure stack'
+    Default: 'rds-infrastructure'
+
+  ProxyName:
+    Type: String
+    Default: 'rds-proxy'
+    Description: 'Name of the RDS Proxy'
+
+Resources:
+  # IAM Role for RDS Proxy
+  RDSProxyRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: rds.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: RDSProxySecretsManagerPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                  - secretsmanager:DescribeSecret
+                Resource:
+                  Fn::ImportValue: !Sub '${InfrastructureStackName}-Database-Secret-ARN'
+              - Effect: Allow
+                Action:
+                  - kms:Decrypt
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    'kms:ViaService': !Sub 'secretsmanager.${AWS::Region}.amazonaws.com'
+
+  # RDS Proxy
+  RDSProxy:
+    Type: AWS::RDS::DBProxy
+    Properties:
+      DBProxyName: !Ref ProxyName
+      EngineFamily: MYSQL
+      Auth:
+        - AuthScheme: SECRETS
+          SecretArn:
+            Fn::ImportValue: !Sub '${InfrastructureStackName}-Database-Secret-ARN'
+      RoleArn: !GetAtt RDSProxyRole.Arn
+      VpcSubnetIds:
+        - Fn::ImportValue: !Sub '${InfrastructureStackName}-PrivateSubnet1-ID'
+        - Fn::ImportValue: !Sub '${InfrastructureStackName}-PrivateSubnet2-ID'
+      VpcSecurityGroupIds:
+        - !Ref RDSProxySecurityGroup
+      RequireTLS: true
+      IdleClientTimeout: 1800
+      MaxConnectionsPercent: 100
+      MaxIdleConnectionsPercent: 50
+      Tags:
+        - Key: Name
+          Value: !Ref ProxyName
+
+  # Security Group for RDS Proxy
+  RDSProxySecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: 'Security group for RDS Proxy'
+      VpcId:
+        Fn::ImportValue: !Sub '${InfrastructureStackName}-VPC-ID'
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          SourceSecurityGroupId:
+            Fn::ImportValue: !Sub '${InfrastructureStackName}-Lambda-SecurityGroup-ID'
+        - IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          SourceSecurityGroupId:
+            Fn::ImportValue: !Sub '${InfrastructureStackName}-Application-SecurityGroup-ID'
+      Tags:
+        - Key: Name
+          Value: 'rds-proxy-sg'
+
+  # RDS Proxy Target Group
+  RDSProxyTargetGroup:
+    Type: AWS::RDS::DBProxyTargetGroup
+    Properties:
+      DBProxyName: !Ref RDSProxy
+      TargetGroupName: default
+      DBInstanceIdentifiers:
+        - 'rds-mysql-instance'
+      ConnectionPoolConfig:
+        MaxConnectionsPercent: 100
+        MaxIdleConnectionsPercent: 50
+        ConnectionBorrowTimeout: 120
+
+  # Lambda Functions for testing RDS Proxy
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+      Policies:
+        - PolicyName: SecretsManagerAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                  - secretsmanager:DescribeSecret
+                Resource:
+                  Fn::ImportValue: !Sub '${InfrastructureStackName}-Database-Secret-ARN'
+        - PolicyName: RDSConnectAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - rds-db:connect
+                Resource: !Sub 'arn:aws:rds-db:${AWS::Region}:${AWS::AccountId}:dbuser:${RDSProxy}/*'
+
+  # Lambda function for direct RDS connection (without proxy)
+  DirectRDSFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: 'direct-rds-connection'
+      Runtime: python3.9
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 30
+      VpcConfig:
+        SecurityGroupIds:
+          - Fn::ImportValue: !Sub '${InfrastructureStackName}-Lambda-SecurityGroup-ID'
+        SubnetIds:
+          - Fn::ImportValue: !Sub '${InfrastructureStackName}-PrivateSubnet1-ID'
+          - Fn::ImportValue: !Sub '${InfrastructureStackName}-PrivateSubnet2-ID'
+      Environment:
+        Variables:
+          DB_ENDPOINT:
+            Fn::ImportValue: !Sub '${InfrastructureStackName}-Database-Endpoint'
+          DB_SECRET_ARN:
+            Fn::ImportValue: !Sub '${InfrastructureStackName}-Database-Secret-ARN'
+          DB_NAME:
+            Fn::ImportValue: !Sub '${InfrastructureStackName}-Database-Name'
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import pymysql
+          import os
+          from datetime import datetime
+          
+          def lambda_handler(event, context):
+              # Get database credentials from Secrets Manager
+              secrets_client = boto3.client('secretsmanager')
+              
+              try:
+                  secret_response = secrets_client.get_secret_value(
+                      SecretId=os.environ['DB_SECRET_ARN']
+                  )
+                  secret = json.loads(secret_response['SecretString'])
+                  
+                  # Connect directly to RDS
+                  connection = pymysql.connect(
+                      host=os.environ['DB_ENDPOINT'],
+                      user=secret['username'],
+                      password=secret['password'],
+                      database=os.environ['DB_NAME'],
+                      charset='utf8mb4',
+                      cursorclass=pymysql.cursors.DictCursor
+                  )
+                  
+                  with connection:
+                      with connection.cursor() as cursor:
+                          # Create table if not exists
+                          cursor.execute("""
+                              CREATE TABLE IF NOT EXISTS connection_test (
+                                  id INT AUTO_INCREMENT PRIMARY KEY,
+                                  connection_type VARCHAR(50),
+                                  timestamp DATETIME,
+                                  function_name VARCHAR(100)
+                              )
+                          """)
+                          
+                          # Insert test record
+                          cursor.execute("""
+                              INSERT INTO connection_test (connection_type, timestamp, function_name)
+                              VALUES (%s, %s, %s)
+                          """, ('direct', datetime.now(), context.function_name))
+                          
+                          connection.commit()
+                          
+                          # Query recent records
+                          cursor.execute("""
+                              SELECT * FROM connection_test 
+                              ORDER BY timestamp DESC 
+                              LIMIT 10
+                          """)
+                          results = cursor.fetchall()
+                  
+                  return {
+                      'statusCode': 200,
+                      'body': json.dumps({
+                          'message': 'Direct RDS connection successful',
+                          'connection_type': 'direct',
+                          'recent_records': results
+                      }, default=str)
+                  }
+                  
+              except Exception as e:
+                  print(f"Error: {str(e)}")
+                  return {
+                      'statusCode': 500,
+                      'body': json.dumps({
+                          'error': str(e),
+                          'connection_type': 'direct'
+                      })
+                  }
+
+  # Lambda function for RDS Proxy connection
+  ProxyRDSFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: 'proxy-rds-connection'
+      Runtime: python3.9
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 30
+      VpcConfig:
+        SecurityGroupIds:
+          - Fn::ImportValue: !Sub '${InfrastructureStackName}-Lambda-SecurityGroup-ID'
+        SubnetIds:
+          - Fn::ImportValue: !Sub '${InfrastructureStackName}-PrivateSubnet1-ID'
+          - Fn::ImportValue: !Sub '${InfrastructureStackName}-PrivateSubnet2-ID'
+      Environment:
+        Variables:
+          PROXY_ENDPOINT: !GetAtt RDSProxy.Endpoint
+          DB_SECRET_ARN:
+            Fn::ImportValue: !Sub '${InfrastructureStackName}-Database-Secret-ARN'
+          DB_NAME:
+            Fn::ImportValue: !Sub '${InfrastructureStackName}-Database-Name'
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import pymysql
+          import os
+          from datetime import datetime
+          
+          def lambda_handler(event, context):
+              # Get database credentials from Secrets Manager
+              secrets_client = boto3.client('secretsmanager')
+              
+              try:
+                  secret_response = secrets_client.get_secret_value(
+                      SecretId=os.environ['DB_SECRET_ARN']
+                  )
+                  secret = json.loads(secret_response['SecretString'])
+                  
+                  # Connect through RDS Proxy
+                  connection = pymysql.connect(
+                      host=os.environ['PROXY_ENDPOINT'],
+                      user=secret['username'],
+                      password=secret['password'],
+                      database=os.environ['DB_NAME'],
+                      charset='utf8mb4',
+                      cursorclass=pymysql.cursors.DictCursor
+                  )
+                  
+                  with connection:
+                      with connection.cursor() as cursor:
+                          # Create table if not exists
+                          cursor.execute("""
+                              CREATE TABLE IF NOT EXISTS connection_test (
+                                  id INT AUTO_INCREMENT PRIMARY KEY,
+                                  connection_type VARCHAR(50),
+                                  timestamp DATETIME,
+                                  function_name VARCHAR(100)
+                              )
+                          """)
+                          
+                          # Insert test record
+                          cursor.execute("""
+                              INSERT INTO connection_test (connection_type, timestamp, function_name)
+                              VALUES (%s, %s, %s)
+                          """, ('proxy', datetime.now(), context.function_name))
+                          
+                          connection.commit()
+                          
+                          # Query recent records
+                          cursor.execute("""
+                              SELECT * FROM connection_test 
+                              ORDER BY timestamp DESC 
+                              LIMIT 10
+                          """)
+                          results = cursor.fetchall()
+                  
+                  return {
+                      'statusCode': 200,
+                      'body': json.dumps({
+                          'message': 'RDS Proxy connection successful',
+                          'connection_type': 'proxy',
+                          'recent_records': results
+                      }, default=str)
+                  }
+                  
+              except Exception as e:
+                  print(f"Error: {str(e)}")
+                  return {
+                      'statusCode': 500,
+                      'body': json.dumps({
+                          'error': str(e),
+                          'connection_type': 'proxy'
+                      })
+                  }
+
+  # Lambda function for connection pooling demonstration
+  ConnectionPoolingFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: 'connection-pooling-demo'
+      Runtime: python3.9
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 60
+      VpcConfig:
+        SecurityGroupIds:
+          - Fn::ImportValue: !Sub '${InfrastructureStackName}-Lambda-SecurityGroup-ID'
+        SubnetIds:
+          - Fn::ImportValue: !Sub '${InfrastructureStackName}-PrivateSubnet1-ID'
+          - Fn::ImportValue: !Sub '${InfrastructureStackName}-PrivateSubnet2-ID'
+      Environment:
+        Variables:
+          PROXY_ENDPOINT: !GetAtt RDSProxy.Endpoint
+          DIRECT_ENDPOINT:
+            Fn::ImportValue: !Sub '${InfrastructureStackName}-Database-Endpoint'
+          DB_SECRET_ARN:
+            Fn::ImportValue: !Sub '${InfrastructureStackName}-Database-Secret-ARN'
+          DB_NAME:
+            Fn::ImportValue: !Sub '${InfrastructureStackName}-Database-Name'
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import pymysql
+          import os
+          import time
+          import concurrent.futures
+          from datetime import datetime
+          
+          def test_connection(endpoint, connection_type, iteration):
+              """Test a single database connection"""
+              secrets_client = boto3.client('secretsmanager')
+              
+              try:
+                  secret_response = secrets_client.get_secret_value(
+                      SecretId=os.environ['DB_SECRET_ARN']
+                  )
+                  secret = json.loads(secret_response['SecretString'])
+                  
+                  start_time = time.time()
+                  
+                  connection = pymysql.connect(
+                      host=endpoint,
+                      user=secret['username'],
+                      password=secret['password'],
+                      database=os.environ['DB_NAME'],
+                      charset='utf8mb4',
+                      cursorclass=pymysql.cursors.DictCursor
+                  )
+                  
+                  with connection:
+                      with connection.cursor() as cursor:
+                          cursor.execute("SELECT 1 as test")
+                          result = cursor.fetchone()
+                  
+                  end_time = time.time()
+                  
+                  return {
+                      'iteration': iteration,
+                      'connection_type': connection_type,
+                      'success': True,
+                      'duration': end_time - start_time,
+                      'result': result
+                  }
+                  
+              except Exception as e:
+                  end_time = time.time()
+                  return {
+                      'iteration': iteration,
+                      'connection_type': connection_type,
+                      'success': False,
+                      'duration': end_time - start_time,
+                      'error': str(e)
+                  }
+          
+          def lambda_handler(event, context):
+              num_connections = event.get('num_connections', 10)
+              
+              # Test direct connections
+              direct_results = []
+              proxy_results = []
+              
+              print(f"Testing {num_connections} concurrent connections...")
+              
+              # Test direct RDS connections
+              with concurrent.futures.ThreadPoolExecutor(max_workers=num_connections) as executor:
+                  direct_futures = [
+                      executor.submit(test_connection, os.environ['DIRECT_ENDPOINT'], 'direct', i)
+                      for i in range(num_connections)
+                  ]
+                  
+                  for future in concurrent.futures.as_completed(direct_futures):
+                      direct_results.append(future.result())
+              
+              # Test RDS Proxy connections
+              with concurrent.futures.ThreadPoolExecutor(max_workers=num_connections) as executor:
+                  proxy_futures = [
+                      executor.submit(test_connection, os.environ['PROXY_ENDPOINT'], 'proxy', i)
+                      for i in range(num_connections)
+                  ]
+                  
+                  for future in concurrent.futures.as_completed(proxy_futures):
+                      proxy_results.append(future.result())
+              
+              # Calculate statistics
+              direct_success = sum(1 for r in direct_results if r['success'])
+              proxy_success = sum(1 for r in proxy_results if r['success'])
+              
+              direct_avg_duration = sum(r['duration'] for r in direct_results if r['success']) / max(direct_success, 1)
+              proxy_avg_duration = sum(r['duration'] for r in proxy_results if r['success']) / max(proxy_success, 1)
+              
+              return {
+                  'statusCode': 200,
+                  'body': json.dumps({
+                      'test_parameters': {
+                          'num_connections': num_connections,
+                          'timestamp': datetime.now().isoformat()
+                      },
+                      'direct_rds': {
+                          'successful_connections': direct_success,
+                          'failed_connections': num_connections - direct_success,
+                          'average_duration': direct_avg_duration,
+                          'results': direct_results
+                      },
+                      'rds_proxy': {
+                          'successful_connections': proxy_success,
+                          'failed_connections': num_connections - proxy_success,
+                          'average_duration': proxy_avg_duration,
+                          'results': proxy_results
+                      },
+                      'summary': {
+                          'proxy_improvement': {
+                              'success_rate_improvement': (proxy_success - direct_success) / num_connections * 100,
+                              'performance_improvement': (direct_avg_duration - proxy_avg_duration) / direct_avg_duration * 100 if direct_avg_duration > 0 else 0
+                          }
+                      }
+                  }, default=str)
+              }
+
+  # Lambda Layer for PyMySQL
+  PyMySQLLayer:
+    Type: AWS::Lambda::LayerVersion
+    Properties:
+      LayerName: 'pymysql-layer'
+      Description: 'PyMySQL library for Lambda functions'
+      Content:
+        S3Bucket: !Ref LayerBucket
+        S3Key: 'pymysql-layer.zip'
+      CompatibleRuntimes:
+        - python3.9
+
+  # S3 Bucket for Lambda Layer
+  LayerBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub 'rds-lambda-layers-${AWS::AccountId}-${AWS::Region}'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  # CloudWatch Dashboard for RDS Proxy monitoring
+  RDSProxyDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub '${ProxyName}-monitoring'
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "metric",
+              "x": 0,
+              "y": 0,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  [ "AWS/RDS", "DatabaseConnections", "DBProxyName", "${RDSProxy}" ],
+                  [ ".", "MaxDatabaseConnectionsAllowed", ".", "." ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "RDS Proxy Connections",
+                "period": 300
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12,
+              "y": 0,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  [ "AWS/RDS", "QueryDatabaseResponseLatency", "DBProxyName", "${RDSProxy}" ],
+                  [ ".", "QueryResponseLatency", ".", "." ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "RDS Proxy Latency",
+                "period": 300
+              }
+            }
+          ]
+        }
+
+Outputs:
+  RDSProxyEndpoint:
+    Description: 'RDS Proxy Endpoint'
+    Value: !GetAtt RDSProxy.Endpoint
+    Export:
+      Name: !Sub '${AWS::StackName}-RDSProxy-Endpoint'
+
+  RDSProxyArn:
+    Description: 'RDS Proxy ARN'
+    Value: !GetAtt RDSProxy.DBProxyArn
+    Export:
+      Name: !Sub '${AWS::StackName}-RDSProxy-ARN'
+
+  DirectRDSFunctionArn:
+    Description: 'Direct RDS Connection Lambda Function ARN'
+    Value: !GetAtt DirectRDSFunction.Arn
+
+  ProxyRDSFunctionArn:
+    Description: 'RDS Proxy Connection Lambda Function ARN'
+    Value: !GetAtt ProxyRDSFunction.Arn
+
+  ConnectionPoolingFunctionArn:
+    Description: 'Connection Pooling Demo Lambda Function ARN'
+    Value: !GetAtt ConnectionPoolingFunction.Arn
+
+  DashboardURL:
+    Description: 'CloudWatch Dashboard URL'
+    Value: !Sub 'https://console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#dashboards:name=${ProxyName}-monitoring'

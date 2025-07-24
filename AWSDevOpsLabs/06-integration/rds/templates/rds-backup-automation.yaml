@@ -1,0 +1,710 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Database backup and restore automation workflows for RDS'
+
+Parameters:
+  InfrastructureStackName:
+    Type: String
+    Description: 'Name of the infrastructure stack'
+    Default: 'rds-infrastructure'
+
+  BackupRetentionDays:
+    Type: Number
+    Default: 30
+    MinValue: 1
+    MaxValue: 365
+    Description: 'Number of days to retain automated backups'
+
+  BackupSchedule:
+    Type: String
+    Default: 'cron(0 2 * * ? *)'
+    Description: 'Cron expression for backup schedule (daily at 2 AM UTC)'
+
+Resources:
+  # S3 Bucket for backup exports
+  BackupBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub 'rds-backups-${AWS::AccountId}-${AWS::Region}'
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteOldBackups
+            Status: Enabled
+            ExpirationInDays: !Ref BackupRetentionDays
+          - Id: TransitionToIA
+            Status: Enabled
+            Transition:
+              StorageClass: STANDARD_IA
+              TransitionInDays: 30
+          - Id: TransitionToGlacier
+            Status: Enabled
+            Transition:
+              StorageClass: GLACIER
+              TransitionInDays: 90
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      NotificationConfiguration:
+        LambdaConfigurations:
+          - Event: s3:ObjectCreated:*
+            Function: !GetAtt BackupNotificationFunction.Arn
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: prefix
+                    Value: 'exports/'
+
+  # KMS Key for backup encryption
+  BackupKMSKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: 'KMS key for RDS backup encryption'
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: Enable IAM User Permissions
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root'
+            Action: 'kms:*'
+            Resource: '*'
+          - Sid: Allow RDS Service
+            Effect: Allow
+            Principal:
+              Service: rds.amazonaws.com
+            Action:
+              - kms:Decrypt
+              - kms:GenerateDataKey
+            Resource: '*'
+          - Sid: Allow Lambda Service
+            Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action:
+              - kms:Decrypt
+              - kms:GenerateDataKey
+            Resource: '*'
+
+  BackupKMSKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: 'alias/rds-backup-key'
+      TargetKeyId: !Ref BackupKMSKey
+
+  # IAM Role for backup automation
+  BackupAutomationRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: RDSBackupPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - rds:CreateDBSnapshot
+                  - rds:DeleteDBSnapshot
+                  - rds:DescribeDBSnapshots
+                  - rds:DescribeDBInstances
+                  - rds:RestoreDBInstanceFromDBSnapshot
+                  - rds:ModifyDBInstance
+                  - rds:StartExportTask
+                  - rds:DescribeExportTasks
+                  - rds:CancelExportTask
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub '${BackupBucket}/*'
+                  - !GetAtt BackupBucket.Arn
+              - Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:GenerateDataKey
+                Resource: !GetAtt BackupKMSKey.Arn
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: !Ref BackupNotificationTopic
+              - Effect: Allow
+                Action:
+                  - iam:PassRole
+                Resource: !GetAtt RDSExportRole.Arn
+
+  # IAM Role for RDS export to S3
+  RDSExportRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: export.rds.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: RDSExportPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:PutObject*
+                  - s3:ListBucket
+                  - s3:GetObject*
+                  - s3:DeleteObject*
+                  - s3:GetBucketLocation
+                Resource:
+                  - !Sub '${BackupBucket}/*'
+                  - !GetAtt BackupBucket.Arn
+              - Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:GenerateDataKey
+                Resource: !GetAtt BackupKMSKey.Arn
+
+  # SNS Topic for backup notifications
+  BackupNotificationTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: 'rds-backup-notifications'
+      DisplayName: 'RDS Backup Notifications'
+
+  # Lambda function for automated backups
+  BackupFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: 'rds-backup-automation'
+      Runtime: python3.9
+      Handler: index.lambda_handler
+      Role: !GetAtt BackupAutomationRole.Arn
+      Timeout: 300
+      Environment:
+        Variables:
+          DB_INSTANCE_ID: 'rds-mysql-instance'
+          BACKUP_BUCKET: !Ref BackupBucket
+          KMS_KEY_ID: !GetAtt BackupKMSKey.Arn
+          SNS_TOPIC_ARN: !Ref BackupNotificationTopic
+          EXPORT_ROLE_ARN: !GetAtt RDSExportRole.Arn
+          RETENTION_DAYS: !Ref BackupRetentionDays
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+          from datetime import datetime, timedelta
+          
+          rds = boto3.client('rds')
+          s3 = boto3.client('s3')
+          sns = boto3.client('sns')
+          
+          def lambda_handler(event, context):
+              db_instance_id = os.environ['DB_INSTANCE_ID']
+              backup_bucket = os.environ['BACKUP_BUCKET']
+              kms_key_id = os.environ['KMS_KEY_ID']
+              sns_topic_arn = os.environ['SNS_TOPIC_ARN']
+              export_role_arn = os.environ['EXPORT_ROLE_ARN']
+              retention_days = int(os.environ['RETENTION_DAYS'])
+              
+              try:
+                  # Create manual snapshot
+                  snapshot_id = f"{db_instance_id}-manual-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+                  
+                  print(f"Creating snapshot: {snapshot_id}")
+                  snapshot_response = rds.create_db_snapshot(
+                      DBSnapshotIdentifier=snapshot_id,
+                      DBInstanceIdentifier=db_instance_id
+                  )
+                  
+                  # Wait for snapshot to complete (in production, use Step Functions)
+                  waiter = rds.get_waiter('db_snapshot_completed')
+                  waiter.wait(
+                      DBSnapshotIdentifier=snapshot_id,
+                      WaiterConfig={'Delay': 30, 'MaxAttempts': 120}
+                  )
+                  
+                  print(f"Snapshot {snapshot_id} completed successfully")
+                  
+                  # Export snapshot to S3
+                  export_task_id = f"export-{snapshot_id}"
+                  export_response = rds.start_export_task(
+                      ExportTaskIdentifier=export_task_id,
+                      SourceArn=snapshot_response['DBSnapshot']['DBSnapshotArn'],
+                      S3BucketName=backup_bucket,
+                      S3Prefix=f"exports/{datetime.now().strftime('%Y/%m/%d')}/",
+                      IamRoleArn=export_role_arn,
+                      KmsKeyId=kms_key_id
+                  )
+                  
+                  print(f"Export task {export_task_id} started")
+                  
+                  # Clean up old snapshots
+                  cleanup_old_snapshots(db_instance_id, retention_days)
+                  
+                  # Send success notification
+                  message = {
+                      'status': 'SUCCESS',
+                      'snapshot_id': snapshot_id,
+                      'export_task_id': export_task_id,
+                      'timestamp': datetime.now().isoformat(),
+                      'db_instance': db_instance_id
+                  }
+                  
+                  sns.publish(
+                      TopicArn=sns_topic_arn,
+                      Message=json.dumps(message, indent=2),
+                      Subject=f'RDS Backup Success - {db_instance_id}'
+                  )
+                  
+                  return {
+                      'statusCode': 200,
+                      'body': json.dumps(message)
+                  }
+                  
+              except Exception as e:
+                  error_message = {
+                      'status': 'ERROR',
+                      'error': str(e),
+                      'timestamp': datetime.now().isoformat(),
+                      'db_instance': db_instance_id
+                  }
+                  
+                  print(f"Backup failed: {str(e)}")
+                  
+                  sns.publish(
+                      TopicArn=sns_topic_arn,
+                      Message=json.dumps(error_message, indent=2),
+                      Subject=f'RDS Backup Failed - {db_instance_id}'
+                  )
+                  
+                  return {
+                      'statusCode': 500,
+                      'body': json.dumps(error_message)
+                  }
+          
+          def cleanup_old_snapshots(db_instance_id, retention_days):
+              """Clean up snapshots older than retention period"""
+              try:
+                  # Get all manual snapshots for this instance
+                  snapshots = rds.describe_db_snapshots(
+                      DBInstanceIdentifier=db_instance_id,
+                      SnapshotType='manual'
+                  )
+                  
+                  cutoff_date = datetime.now() - timedelta(days=retention_days)
+                  
+                  for snapshot in snapshots['DBSnapshots']:
+                      snapshot_date = snapshot['SnapshotCreateTime'].replace(tzinfo=None)
+                      
+                      if snapshot_date < cutoff_date:
+                          print(f"Deleting old snapshot: {snapshot['DBSnapshotIdentifier']}")
+                          rds.delete_db_snapshot(
+                              DBSnapshotIdentifier=snapshot['DBSnapshotIdentifier']
+                          )
+                          
+              except Exception as e:
+                  print(f"Error cleaning up old snapshots: {str(e)}")
+
+  # Lambda function for restore operations
+  RestoreFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: 'rds-restore-automation'
+      Runtime: python3.9
+      Handler: index.lambda_handler
+      Role: !GetAtt BackupAutomationRole.Arn
+      Timeout: 300
+      Environment:
+        Variables:
+          BACKUP_BUCKET: !Ref BackupBucket
+          SNS_TOPIC_ARN: !Ref BackupNotificationTopic
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+          from datetime import datetime
+          
+          rds = boto3.client('rds')
+          sns = boto3.client('sns')
+          
+          def lambda_handler(event, context):
+              """
+              Restore RDS instance from snapshot
+              Expected event format:
+              {
+                "snapshot_id": "snapshot-identifier",
+                "new_instance_id": "new-instance-identifier",
+                "instance_class": "db.t3.micro",
+                "subnet_group": "subnet-group-name",
+                "security_groups": ["sg-12345"]
+              }
+              """
+              
+              try:
+                  snapshot_id = event['snapshot_id']
+                  new_instance_id = event['new_instance_id']
+                  instance_class = event.get('instance_class', 'db.t3.micro')
+                  subnet_group = event.get('subnet_group', 'rds-subnet-group')
+                  security_groups = event.get('security_groups', [])
+                  
+                  print(f"Restoring from snapshot {snapshot_id} to new instance {new_instance_id}")
+                  
+                  # Restore DB instance from snapshot
+                  restore_response = rds.restore_db_instance_from_db_snapshot(
+                      DBInstanceIdentifier=new_instance_id,
+                      DBSnapshotIdentifier=snapshot_id,
+                      DBInstanceClass=instance_class,
+                      DBSubnetGroupName=subnet_group,
+                      VpcSecurityGroupIds=security_groups,
+                      PubliclyAccessible=False,
+                      StorageEncrypted=True,
+                      EnableCloudwatchLogsExports=['error', 'general', 'slowquery']
+                  )
+                  
+                  # Send notification
+                  message = {
+                      'status': 'RESTORE_STARTED',
+                      'snapshot_id': snapshot_id,
+                      'new_instance_id': new_instance_id,
+                      'timestamp': datetime.now().isoformat()
+                  }
+                  
+                  sns.publish(
+                      TopicArn=os.environ['SNS_TOPIC_ARN'],
+                      Message=json.dumps(message, indent=2),
+                      Subject=f'RDS Restore Started - {new_instance_id}'
+                  )
+                  
+                  return {
+                      'statusCode': 200,
+                      'body': json.dumps({
+                          'message': 'Restore operation started successfully',
+                          'new_instance_id': new_instance_id,
+                          'snapshot_id': snapshot_id
+                      })
+                  }
+                  
+              except Exception as e:
+                  error_message = {
+                      'status': 'RESTORE_ERROR',
+                      'error': str(e),
+                      'timestamp': datetime.now().isoformat()
+                  }
+                  
+                  print(f"Restore failed: {str(e)}")
+                  
+                  sns.publish(
+                      TopicArn=os.environ['SNS_TOPIC_ARN'],
+                      Message=json.dumps(error_message, indent=2),
+                      Subject='RDS Restore Failed'
+                  )
+                  
+                  return {
+                      'statusCode': 500,
+                      'body': json.dumps(error_message)
+                  }
+
+  # Lambda function for backup notifications
+  BackupNotificationFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: 'rds-backup-notification'
+      Runtime: python3.9
+      Handler: index.lambda_handler
+      Role: !GetAtt BackupAutomationRole.Arn
+      Timeout: 60
+      Environment:
+        Variables:
+          SNS_TOPIC_ARN: !Ref BackupNotificationTopic
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+          from datetime import datetime
+          from urllib.parse import unquote_plus
+          
+          sns = boto3.client('sns')
+          s3 = boto3.client('s3')
+          
+          def lambda_handler(event, context):
+              """Handle S3 events for backup exports"""
+              
+              try:
+                  for record in event['Records']:
+                      bucket = record['s3']['bucket']['name']
+                      key = unquote_plus(record['s3']['object']['key'])
+                      event_name = record['eventName']
+                      
+                      if 'exports/' in key and event_name.startswith('ObjectCreated'):
+                          # Get object metadata
+                          obj_response = s3.head_object(Bucket=bucket, Key=key)
+                          
+                          message = {
+                              'status': 'EXPORT_COMPLETED',
+                              'bucket': bucket,
+                              'key': key,
+                              'size': obj_response['ContentLength'],
+                              'last_modified': obj_response['LastModified'].isoformat(),
+                              'timestamp': datetime.now().isoformat()
+                          }
+                          
+                          sns.publish(
+                              TopicArn=os.environ['SNS_TOPIC_ARN'],
+                              Message=json.dumps(message, indent=2),
+                              Subject=f'RDS Export Completed - {key}'
+                          )
+                          
+                          print(f"Export notification sent for {key}")
+                  
+                  return {
+                      'statusCode': 200,
+                      'body': json.dumps({'message': 'Notifications processed successfully'})
+                  }
+                  
+              except Exception as e:
+                  print(f"Notification error: {str(e)}")
+                  return {
+                      'statusCode': 500,
+                      'body': json.dumps({'error': str(e)})
+                  }
+
+  # EventBridge rule for scheduled backups
+  BackupScheduleRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: 'rds-backup-schedule'
+      Description: 'Scheduled RDS backup automation'
+      ScheduleExpression: !Ref BackupSchedule
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt BackupFunction.Arn
+          Id: 'BackupTarget'
+
+  # Permission for EventBridge to invoke backup function
+  BackupFunctionPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref BackupFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt BackupScheduleRule.Arn
+
+  # Permission for S3 to invoke notification function
+  BackupNotificationPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref BackupNotificationFunction
+      Action: lambda:InvokeFunction
+      Principal: s3.amazonaws.com
+      SourceAccount: !Ref AWS::AccountId
+      SourceArn: !GetAtt BackupBucket.Arn
+
+  # Step Functions state machine for complex backup workflows
+  BackupStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: 'rds-backup-workflow'
+      RoleArn: !GetAtt StepFunctionsRole.Arn
+      DefinitionString: !Sub |
+        {
+          "Comment": "RDS Backup and Export Workflow",
+          "StartAt": "CreateSnapshot",
+          "States": {
+            "CreateSnapshot": {
+              "Type": "Task",
+              "Resource": "${BackupFunction.Arn}",
+              "Retry": [
+                {
+                  "ErrorEquals": ["States.ALL"],
+                  "IntervalSeconds": 30,
+                  "MaxAttempts": 3,
+                  "BackoffRate": 2.0
+                }
+              ],
+              "Catch": [
+                {
+                  "ErrorEquals": ["States.ALL"],
+                  "Next": "NotifyFailure"
+                }
+              ],
+              "Next": "WaitForExport"
+            },
+            "WaitForExport": {
+              "Type": "Wait",
+              "Seconds": 300,
+              "Next": "CheckExportStatus"
+            },
+            "CheckExportStatus": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::aws-sdk:rds:describeExportTasks",
+              "Parameters": {
+                "ExportTaskIdentifier.$": "$.body.export_task_id"
+              },
+              "Next": "IsExportComplete"
+            },
+            "IsExportComplete": {
+              "Type": "Choice",
+              "Choices": [
+                {
+                  "Variable": "$.ExportTasks[0].Status",
+                  "StringEquals": "COMPLETE",
+                  "Next": "NotifySuccess"
+                },
+                {
+                  "Variable": "$.ExportTasks[0].Status",
+                  "StringEquals": "FAILED",
+                  "Next": "NotifyFailure"
+                }
+              ],
+              "Default": "WaitForExport"
+            },
+            "NotifySuccess": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::sns:publish",
+              "Parameters": {
+                "TopicArn": "${BackupNotificationTopic}",
+                "Message": "Backup workflow completed successfully",
+                "Subject": "RDS Backup Workflow Success"
+              },
+              "End": true
+            },
+            "NotifyFailure": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::sns:publish",
+              "Parameters": {
+                "TopicArn": "${BackupNotificationTopic}",
+                "Message": "Backup workflow failed",
+                "Subject": "RDS Backup Workflow Failure"
+              },
+              "End": true
+            }
+          }
+        }
+
+  # IAM Role for Step Functions
+  StepFunctionsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: states.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: StepFunctionsExecutionPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource:
+                  - !GetAtt BackupFunction.Arn
+                  - !GetAtt RestoreFunction.Arn
+              - Effect: Allow
+                Action:
+                  - rds:DescribeExportTasks
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: !Ref BackupNotificationTopic
+
+  # CloudWatch Dashboard for backup monitoring
+  BackupDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: 'rds-backup-monitoring'
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "metric",
+              "x": 0,
+              "y": 0,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  [ "AWS/Lambda", "Duration", "FunctionName", "${BackupFunction}" ],
+                  [ ".", "Errors", ".", "." ],
+                  [ ".", "Invocations", ".", "." ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "Backup Function Metrics",
+                "period": 300
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12,
+              "y": 0,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  [ "AWS/RDS", "DatabaseConnections", "DBInstanceIdentifier", "rds-mysql-instance" ],
+                  [ ".", "CPUUtilization", ".", "." ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "RDS Instance Metrics",
+                "period": 300
+              }
+            }
+          ]
+        }
+
+Outputs:
+  BackupBucketName:
+    Description: 'S3 Bucket for backup storage'
+    Value: !Ref BackupBucket
+    Export:
+      Name: !Sub '${AWS::StackName}-BackupBucket-Name'
+
+  BackupFunctionArn:
+    Description: 'Backup Lambda Function ARN'
+    Value: !GetAtt BackupFunction.Arn
+
+  RestoreFunctionArn:
+    Description: 'Restore Lambda Function ARN'
+    Value: !GetAtt RestoreFunction.Arn
+
+  BackupNotificationTopicArn:
+    Description: 'SNS Topic ARN for backup notifications'
+    Value: !Ref BackupNotificationTopic
+
+  BackupStateMachineArn:
+    Description: 'Step Functions State Machine ARN for backup workflow'
+    Value: !Ref BackupStateMachine
+
+  KMSKeyId:
+    Description: 'KMS Key ID for backup encryption'
+    Value: !Ref BackupKMSKey
+
+  DashboardURL:
+    Description: 'CloudWatch Dashboard URL'
+    Value: !Sub 'https://console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#dashboards:name=rds-backup-monitoring'

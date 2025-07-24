@@ -1,0 +1,388 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Advanced ECS Auto-scaling with Custom CloudWatch Metrics'
+
+Parameters:
+  ServiceStackName:
+    Type: String
+    Description: 'Name of the ECS service stack'
+
+  ServiceName:
+    Type: String
+    Description: 'Name of the ECS service'
+
+  ClusterName:
+    Type: String
+    Description: 'Name of the ECS cluster'
+
+Resources:
+  # Custom CloudWatch Metrics Dashboard
+  ECSServiceDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub '${ServiceName}-metrics'
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "metric",
+              "x": 0,
+              "y": 0,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  [ "AWS/ECS", "CPUUtilization", "ServiceName", "${ServiceName}", "ClusterName", "${ClusterName}" ],
+                  [ ".", "MemoryUtilization", ".", ".", ".", "." ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "ECS Service Resource Utilization",
+                "period": 300
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12,
+              "y": 0,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  [ "AWS/ApplicationELB", "RequestCount", "TargetGroup", "${ServiceName}-tg" ],
+                  [ ".", "TargetResponseTime", ".", "." ],
+                  [ ".", "HTTPCode_Target_2XX_Count", ".", "." ],
+                  [ ".", "HTTPCode_Target_4XX_Count", ".", "." ],
+                  [ ".", "HTTPCode_Target_5XX_Count", ".", "." ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "Application Load Balancer Metrics",
+                "period": 300
+              }
+            },
+            {
+              "type": "metric",
+              "x": 0,
+              "y": 6,
+              "width": 24,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  [ "ECS/${ServiceName}", "ErrorCount" ],
+                  [ ".", "RequestLatency" ],
+                  [ ".", "ActiveConnections" ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "Custom Application Metrics",
+                "period": 300
+              }
+            }
+          ]
+        }
+
+  # Custom Metric: Request Latency
+  RequestLatencyMetricFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName:
+        Fn::ImportValue: !Sub '${ServiceStackName}-LogGroup-Name'
+      FilterPattern: '[timestamp, request_id, "LATENCY", latency_ms]'
+      MetricTransformations:
+        - MetricNamespace: !Sub 'ECS/${ServiceName}'
+          MetricName: RequestLatency
+          MetricValue: '$latency_ms'
+          DefaultValue: 0
+
+  # Custom Metric: Active Connections
+  ActiveConnectionsMetricFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName:
+        Fn::ImportValue: !Sub '${ServiceStackName}-LogGroup-Name'
+      FilterPattern: '[timestamp, request_id, "CONNECTIONS", connection_count]'
+      MetricTransformations:
+        - MetricNamespace: !Sub 'ECS/${ServiceName}'
+          MetricName: ActiveConnections
+          MetricValue: '$connection_count'
+          DefaultValue: 0
+
+  # Advanced Scaling Policy: Request Count per Target
+  RequestCountScalingPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: !Sub '${ServiceName}-request-count-scaling'
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId:
+        Fn::ImportValue: !Sub '${ServiceStackName}-ScalingTarget-ID'
+      TargetTrackingScalingPolicyConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ALBRequestCountPerTarget
+          ResourceLabel: !Sub 
+            - '${LoadBalancerFullName}/${TargetGroupFullName}'
+            - LoadBalancerFullName:
+                Fn::ImportValue: !Sub '${ServiceStackName}-ALB-FullName'
+              TargetGroupFullName:
+                Fn::ImportValue: !Sub '${ServiceStackName}-TargetGroup-FullName'
+        TargetValue: 1000
+        ScaleOutCooldown: 300
+        ScaleInCooldown: 300
+
+  # Step Scaling Policy for Rapid Scale-out
+  StepScalingPolicyOut:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: !Sub '${ServiceName}-step-scaling-out'
+      PolicyType: StepScaling
+      ScalingTargetId:
+        Fn::ImportValue: !Sub '${ServiceStackName}-ScalingTarget-ID'
+      StepScalingPolicyConfiguration:
+        AdjustmentType: ChangeInCapacity
+        Cooldown: 300
+        MetricAggregationType: Average
+        StepAdjustments:
+          - MetricIntervalLowerBound: 0
+            MetricIntervalUpperBound: 50
+            ScalingAdjustment: 1
+          - MetricIntervalLowerBound: 50
+            MetricIntervalUpperBound: 100
+            ScalingAdjustment: 2
+          - MetricIntervalLowerBound: 100
+            ScalingAdjustment: 3
+
+  # Step Scaling Policy for Scale-in
+  StepScalingPolicyIn:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: !Sub '${ServiceName}-step-scaling-in'
+      PolicyType: StepScaling
+      ScalingTargetId:
+        Fn::ImportValue: !Sub '${ServiceStackName}-ScalingTarget-ID'
+      StepScalingPolicyConfiguration:
+        AdjustmentType: ChangeInCapacity
+        Cooldown: 300
+        MetricAggregationType: Average
+        StepAdjustments:
+          - MetricIntervalUpperBound: 0
+            ScalingAdjustment: -1
+
+  # CloudWatch Alarms for Step Scaling
+  HighRequestLatencyAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${ServiceName}-high-request-latency'
+      AlarmDescription: 'High request latency triggering scale-out'
+      MetricName: RequestLatency
+      Namespace: !Sub 'ECS/${ServiceName}'
+      Statistic: Average
+      Period: 60
+      EvaluationPeriods: 2
+      Threshold: 500
+      ComparisonOperator: GreaterThanThreshold
+      AlarmActions:
+        - !Ref StepScalingPolicyOut
+
+  LowRequestLatencyAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${ServiceName}-low-request-latency'
+      AlarmDescription: 'Low request latency triggering scale-in'
+      MetricName: RequestLatency
+      Namespace: !Sub 'ECS/${ServiceName}'
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 3
+      Threshold: 100
+      ComparisonOperator: LessThanThreshold
+      AlarmActions:
+        - !Ref StepScalingPolicyIn
+
+  # Composite Alarm for Complex Scaling Logic
+  CompositeScalingAlarm:
+    Type: AWS::CloudWatch::CompositeAlarm
+    Properties:
+      AlarmName: !Sub '${ServiceName}-composite-scaling'
+      AlarmDescription: 'Composite alarm for complex scaling decisions'
+      AlarmRule: !Sub |
+        (ALARM("${ServiceName}-high-cpu") OR ALARM("${ServiceName}-high-memory")) 
+        AND ALARM("${ServiceName}-high-request-latency")
+      ActionsEnabled: true
+      AlarmActions:
+        - !Ref ScaleOutNotificationTopic
+
+  # SNS Topic for Scaling Notifications
+  ScaleOutNotificationTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub '${ServiceName}-scaling-notifications'
+      DisplayName: !Sub 'ECS ${ServiceName} Scaling Notifications'
+
+  # Lambda function for custom scaling logic
+  CustomScalingFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${ServiceName}-custom-scaling'
+      Runtime: python3.9
+      Handler: index.lambda_handler
+      Role: !GetAtt CustomScalingRole.Arn
+      Timeout: 60
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+          from datetime import datetime, timedelta
+
+          def lambda_handler(event, context):
+              # Initialize AWS clients
+              ecs_client = boto3.client('ecs')
+              cloudwatch = boto3.client('cloudwatch')
+              autoscaling = boto3.client('application-autoscaling')
+              
+              service_name = os.environ['SERVICE_NAME']
+              cluster_name = os.environ['CLUSTER_NAME']
+              
+              try:
+                  # Get current service metrics
+                  end_time = datetime.utcnow()
+                  start_time = end_time - timedelta(minutes=5)
+                  
+                  # Get CPU utilization
+                  cpu_response = cloudwatch.get_metric_statistics(
+                      Namespace='AWS/ECS',
+                      MetricName='CPUUtilization',
+                      Dimensions=[
+                          {'Name': 'ServiceName', 'Value': service_name},
+                          {'Name': 'ClusterName', 'Value': cluster_name}
+                      ],
+                      StartTime=start_time,
+                      EndTime=end_time,
+                      Period=300,
+                      Statistics=['Average']
+                  )
+                  
+                  # Get current task count
+                  service_response = ecs_client.describe_services(
+                      cluster=cluster_name,
+                      services=[service_name]
+                  )
+                  
+                  current_count = service_response['services'][0]['desiredCount']
+                  
+                  # Custom scaling logic
+                  if cpu_response['Datapoints']:
+                      avg_cpu = sum(dp['Average'] for dp in cpu_response['Datapoints']) / len(cpu_response['Datapoints'])
+                      
+                      # Scale based on time of day and CPU
+                      current_hour = datetime.utcnow().hour
+                      
+                      if 9 <= current_hour <= 17:  # Business hours
+                          if avg_cpu > 60 and current_count < 10:
+                              new_count = min(current_count + 2, 10)
+                          elif avg_cpu < 30 and current_count > 2:
+                              new_count = max(current_count - 1, 2)
+                          else:
+                              new_count = current_count
+                      else:  # Off hours
+                          if avg_cpu > 80 and current_count < 5:
+                              new_count = min(current_count + 1, 5)
+                          elif avg_cpu < 20 and current_count > 1:
+                              new_count = max(current_count - 1, 1)
+                          else:
+                              new_count = current_count
+                      
+                      # Update service if needed
+                      if new_count != current_count:
+                          ecs_client.update_service(
+                              cluster=cluster_name,
+                              service=service_name,
+                              desiredCount=new_count
+                          )
+                          
+                          return {
+                              'statusCode': 200,
+                              'body': json.dumps({
+                                  'message': f'Scaled service from {current_count} to {new_count} tasks',
+                                  'avg_cpu': avg_cpu,
+                                  'hour': current_hour
+                              })
+                          }
+                  
+                  return {
+                      'statusCode': 200,
+                      'body': json.dumps({'message': 'No scaling action needed'})
+                  }
+                  
+              except Exception as e:
+                  print(f"Error: {str(e)}")
+                  return {
+                      'statusCode': 500,
+                      'body': json.dumps({'error': str(e)})
+                  }
+      Environment:
+        Variables:
+          SERVICE_NAME: !Ref ServiceName
+          CLUSTER_NAME: !Ref ClusterName
+
+  # IAM Role for Custom Scaling Lambda
+  CustomScalingRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: ECSScalingPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ecs:DescribeServices
+                  - ecs:UpdateService
+                  - cloudwatch:GetMetricStatistics
+                  - application-autoscaling:*
+                Resource: '*'
+
+  # EventBridge Rule for Scheduled Scaling
+  ScheduledScalingRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub '${ServiceName}-scheduled-scaling'
+      Description: 'Trigger custom scaling logic every 5 minutes'
+      ScheduleExpression: 'rate(5 minutes)'
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt CustomScalingFunction.Arn
+          Id: 'CustomScalingTarget'
+
+  # Permission for EventBridge to invoke Lambda
+  LambdaInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref CustomScalingFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt ScheduledScalingRule.Arn
+
+Outputs:
+  DashboardURL:
+    Description: 'CloudWatch Dashboard URL'
+    Value: !Sub 'https://console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#dashboards:name=${ServiceName}-metrics'
+
+  CustomScalingFunctionArn:
+    Description: 'Custom Scaling Lambda Function ARN'
+    Value: !GetAtt CustomScalingFunction.Arn
+
+  ScalingNotificationTopicArn:
+    Description: 'SNS Topic ARN for Scaling Notifications'
+    Value: !Ref ScaleOutNotificationTopic

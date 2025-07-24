@@ -1,0 +1,572 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Event-driven architecture using Amazon EventBridge with Lambda functions'
+
+Parameters:
+  EventBusName:
+    Type: String
+    Default: 'serverless-integration-bus'
+    Description: 'Name of the custom EventBridge event bus'
+
+Resources:
+  # Custom EventBridge Event Bus
+  CustomEventBus:
+    Type: AWS::Events::EventBus
+    Properties:
+      Name: !Ref EventBusName
+
+  # Lambda Functions for different event types
+  OrderProcessorFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: 'order-processor'
+      Runtime: python3.9
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 30
+      Environment:
+        Variables:
+          EVENT_BUS_NAME: !Ref CustomEventBus
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+          from datetime import datetime
+          
+          eventbridge = boto3.client('events')
+          
+          def lambda_handler(event, context):
+              print(f"Processing order event: {json.dumps(event)}")
+              
+              # Extract order details from the event
+              detail = event.get('detail', {})
+              order_id = detail.get('orderId')
+              customer_id = detail.get('customerId')
+              amount = detail.get('amount', 0)
+              
+              # Process the order
+              processed_order = {
+                  'orderId': order_id,
+                  'customerId': customer_id,
+                  'amount': amount,
+                  'status': 'processed',
+                  'processedAt': datetime.utcnow().isoformat()
+              }
+              
+              # Emit order processed event
+              eventbridge.put_events(
+                  Entries=[
+                      {
+                          'Source': 'order.service',
+                          'DetailType': 'Order Processed',
+                          'Detail': json.dumps(processed_order),
+                          'EventBusName': os.environ['EVENT_BUS_NAME']
+                      }
+                  ]
+              )
+              
+              return {
+                  'statusCode': 200,
+                  'body': json.dumps({
+                      'message': 'Order processed successfully',
+                      'orderId': order_id
+                  })
+              }
+
+  InventoryUpdaterFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: 'inventory-updater'
+      Runtime: python3.9
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 30
+      Environment:
+        Variables:
+          EVENT_BUS_NAME: !Ref CustomEventBus
+          DYNAMODB_TABLE: !Ref InventoryTable
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+          from datetime import datetime
+          
+          dynamodb = boto3.resource('dynamodb')
+          eventbridge = boto3.client('events')
+          
+          def lambda_handler(event, context):
+              print(f"Updating inventory for event: {json.dumps(event)}")
+              
+              detail = event.get('detail', {})
+              order_id = detail.get('orderId')
+              
+              # Simulate inventory update
+              table = dynamodb.Table(os.environ['DYNAMODB_TABLE'])
+              
+              # Update inventory (simplified example)
+              inventory_update = {
+                  'id': f"inventory-{order_id}",
+                  'orderId': order_id,
+                  'action': 'reserved',
+                  'updatedAt': datetime.utcnow().isoformat()
+              }
+              
+              table.put_item(Item=inventory_update)
+              
+              # Emit inventory updated event
+              eventbridge.put_events(
+                  Entries=[
+                      {
+                          'Source': 'inventory.service',
+                          'DetailType': 'Inventory Updated',
+                          'Detail': json.dumps(inventory_update),
+                          'EventBusName': os.environ['EVENT_BUS_NAME']
+                      }
+                  ]
+              )
+              
+              return {
+                  'statusCode': 200,
+                  'body': json.dumps({
+                      'message': 'Inventory updated successfully',
+                      'orderId': order_id
+                  })
+              }
+
+  PaymentProcessorFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: 'payment-processor'
+      Runtime: python3.9
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 30
+      Environment:
+        Variables:
+          EVENT_BUS_NAME: !Ref CustomEventBus
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+          import random
+          from datetime import datetime
+          
+          eventbridge = boto3.client('events')
+          
+          def lambda_handler(event, context):
+              print(f"Processing payment for event: {json.dumps(event)}")
+              
+              detail = event.get('detail', {})
+              order_id = detail.get('orderId')
+              amount = detail.get('amount', 0)
+              
+              # Simulate payment processing (90% success rate)
+              payment_success = random.random() > 0.1
+              
+              payment_result = {
+                  'orderId': order_id,
+                  'amount': amount,
+                  'status': 'completed' if payment_success else 'failed',
+                  'transactionId': f"txn-{order_id}-{int(datetime.utcnow().timestamp())}",
+                  'processedAt': datetime.utcnow().isoformat()
+              }
+              
+              # Emit payment event
+              event_type = 'Payment Completed' if payment_success else 'Payment Failed'
+              eventbridge.put_events(
+                  Entries=[
+                      {
+                          'Source': 'payment.service',
+                          'DetailType': event_type,
+                          'Detail': json.dumps(payment_result),
+                          'EventBusName': os.environ['EVENT_BUS_NAME']
+                      }
+                  ]
+              )
+              
+              return {
+                  'statusCode': 200 if payment_success else 400,
+                  'body': json.dumps({
+                      'message': f'Payment {payment_result["status"]}',
+                      'orderId': order_id,
+                      'transactionId': payment_result['transactionId']
+                  })
+              }
+
+  NotificationServiceFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: 'notification-service'
+      Runtime: python3.9
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 30
+      Environment:
+        Variables:
+          SNS_TOPIC_ARN: !Ref NotificationTopic
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+          from datetime import datetime
+          
+          sns = boto3.client('sns')
+          
+          def lambda_handler(event, context):
+              print(f"Sending notification for event: {json.dumps(event)}")
+              
+              source = event.get('source', '')
+              detail_type = event.get('detail-type', '')
+              detail = event.get('detail', {})
+              
+              # Create notification message based on event type
+              if 'Payment Completed' in detail_type:
+                  subject = 'Payment Successful'
+                  message = f"Payment completed for order {detail.get('orderId')} - Amount: ${detail.get('amount')}"
+              elif 'Payment Failed' in detail_type:
+                  subject = 'Payment Failed'
+                  message = f"Payment failed for order {detail.get('orderId')} - Please retry"
+              elif 'Order Processed' in detail_type:
+                  subject = 'Order Confirmation'
+                  message = f"Your order {detail.get('orderId')} has been processed successfully"
+              elif 'Inventory Updated' in detail_type:
+                  subject = 'Inventory Update'
+                  message = f"Inventory updated for order {detail.get('orderId')}"
+              else:
+                  subject = 'System Notification'
+                  message = f"Event received: {detail_type}"
+              
+              # Send SNS notification
+              sns.publish(
+                  TopicArn=os.environ['SNS_TOPIC_ARN'],
+                  Message=json.dumps({
+                      'subject': subject,
+                      'message': message,
+                      'source': source,
+                      'detailType': detail_type,
+                      'detail': detail,
+                      'timestamp': datetime.utcnow().isoformat()
+                  }, indent=2),
+                  Subject=subject
+              )
+              
+              return {
+                  'statusCode': 200,
+                  'body': json.dumps({
+                      'message': 'Notification sent successfully',
+                      'subject': subject
+                  })
+              }
+
+  # Event Generator Function for testing
+  EventGeneratorFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: 'event-generator'
+      Runtime: python3.9
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 30
+      Environment:
+        Variables:
+          EVENT_BUS_NAME: !Ref CustomEventBus
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+          import random
+          from datetime import datetime
+          
+          eventbridge = boto3.client('events')
+          
+          def lambda_handler(event, context):
+              print(f"Generating test events")
+              
+              # Generate random order event
+              order_id = f"order-{int(datetime.utcnow().timestamp())}-{random.randint(1000, 9999)}"
+              customer_id = f"customer-{random.randint(1, 1000)}"
+              amount = round(random.uniform(10.0, 500.0), 2)
+              
+              order_event = {
+                  'orderId': order_id,
+                  'customerId': customer_id,
+                  'amount': amount,
+                  'items': [
+                      {
+                          'productId': f"product-{random.randint(1, 100)}",
+                          'quantity': random.randint(1, 5),
+                          'price': round(amount / random.randint(1, 3), 2)
+                      }
+                  ],
+                  'createdAt': datetime.utcnow().isoformat()
+              }
+              
+              # Emit order created event
+              response = eventbridge.put_events(
+                  Entries=[
+                      {
+                          'Source': 'order.service',
+                          'DetailType': 'Order Created',
+                          'Detail': json.dumps(order_event),
+                          'EventBusName': os.environ['EVENT_BUS_NAME']
+                      }
+                  ]
+              )
+              
+              return {
+                  'statusCode': 200,
+                  'body': json.dumps({
+                      'message': 'Test event generated successfully',
+                      'orderId': order_id,
+                      'eventResponse': response
+                  })
+              }
+
+  # DynamoDB Table for inventory tracking
+  InventoryTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: 'serverless-inventory'
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH
+      BillingMode: PAY_PER_REQUEST
+
+  # SNS Topic for notifications
+  NotificationTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: 'eventbridge-notifications'
+      DisplayName: 'EventBridge Integration Notifications'
+
+  # EventBridge Rules
+  OrderCreatedRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: 'order-created-rule'
+      EventBusName: !Ref CustomEventBus
+      EventPattern:
+        source: ['order.service']
+        detail-type: ['Order Created']
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt OrderProcessorFunction.Arn
+          Id: 'OrderProcessorTarget'
+
+  OrderProcessedRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: 'order-processed-rule'
+      EventBusName: !Ref CustomEventBus
+      EventPattern:
+        source: ['order.service']
+        detail-type: ['Order Processed']
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt InventoryUpdaterFunction.Arn
+          Id: 'InventoryUpdaterTarget'
+        - Arn: !GetAtt PaymentProcessorFunction.Arn
+          Id: 'PaymentProcessorTarget'
+
+  PaymentCompletedRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: 'payment-completed-rule'
+      EventBusName: !Ref CustomEventBus
+      EventPattern:
+        source: ['payment.service']
+        detail-type: ['Payment Completed']
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt NotificationServiceFunction.Arn
+          Id: 'NotificationTarget'
+
+  PaymentFailedRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: 'payment-failed-rule'
+      EventBusName: !Ref CustomEventBus
+      EventPattern:
+        source: ['payment.service']
+        detail-type: ['Payment Failed']
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt NotificationServiceFunction.Arn
+          Id: 'NotificationFailedTarget'
+
+  InventoryUpdatedRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: 'inventory-updated-rule'
+      EventBusName: !Ref CustomEventBus
+      EventPattern:
+        source: ['inventory.service']
+        detail-type: ['Inventory Updated']
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt NotificationServiceFunction.Arn
+          Id: 'InventoryNotificationTarget'
+
+  # Scheduled rule for generating test events
+  ScheduledEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: 'scheduled-event-generator'
+      ScheduleExpression: 'rate(10 minutes)'
+      State: DISABLED  # Disabled by default to avoid unwanted charges
+      Targets:
+        - Arn: !GetAtt EventGeneratorFunction.Arn
+          Id: 'EventGeneratorTarget'
+
+  # Lambda Permissions for EventBridge
+  OrderProcessorPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref OrderProcessorFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt OrderCreatedRule.Arn
+
+  InventoryUpdaterPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref InventoryUpdaterFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt OrderProcessedRule.Arn
+
+  PaymentProcessorPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref PaymentProcessorFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt OrderProcessedRule.Arn
+
+  NotificationServicePermission1:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref NotificationServiceFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt PaymentCompletedRule.Arn
+
+  NotificationServicePermission2:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref NotificationServiceFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt PaymentFailedRule.Arn
+
+  NotificationServicePermission3:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref NotificationServiceFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt InventoryUpdatedRule.Arn
+
+  EventGeneratorPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref EventGeneratorFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt ScheduledEventRule.Arn
+
+  # IAM Role for Lambda functions
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: EventBridgeAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - events:PutEvents
+                Resource: !GetAtt CustomEventBus.Arn
+        - PolicyName: DynamoDBAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:GetItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                Resource: !GetAtt InventoryTable.Arn
+        - PolicyName: SNSAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: !Ref NotificationTopic
+
+Outputs:
+  CustomEventBusName:
+    Description: 'Custom EventBridge Event Bus Name'
+    Value: !Ref CustomEventBus
+    Export:
+      Name: !Sub '${AWS::StackName}-EventBus-Name'
+
+  CustomEventBusArn:
+    Description: 'Custom EventBridge Event Bus ARN'
+    Value: !GetAtt CustomEventBus.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-EventBus-ARN'
+
+  InventoryTableName:
+    Description: 'DynamoDB Inventory Table Name'
+    Value: !Ref InventoryTable
+    Export:
+      Name: !Sub '${AWS::StackName}-InventoryTable-Name'
+
+  NotificationTopicArn:
+    Description: 'SNS Notification Topic ARN'
+    Value: !Ref NotificationTopic
+    Export:
+      Name: !Sub '${AWS::StackName}-NotificationTopic-ARN'
+
+  EventGeneratorFunctionArn:
+    Description: 'Event Generator Lambda Function ARN'
+    Value: !GetAtt EventGeneratorFunction.Arn
+
+  OrderProcessorFunctionArn:
+    Description: 'Order Processor Lambda Function ARN'
+    Value: !GetAtt OrderProcessorFunction.Arn
+
+  InventoryUpdaterFunctionArn:
+    Description: 'Inventory Updater Lambda Function ARN'
+    Value: !GetAtt InventoryUpdaterFunction.Arn
+
+  PaymentProcessorFunctionArn:
+    Description: 'Payment Processor Lambda Function ARN'
+    Value: !GetAtt PaymentProcessorFunction.Arn
+
+  NotificationServiceFunctionArn:
+    Description: 'Notification Service Lambda Function ARN'
+    Value: !GetAtt NotificationServiceFunction.Arn

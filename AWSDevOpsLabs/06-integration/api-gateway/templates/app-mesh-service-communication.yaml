@@ -1,0 +1,664 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'AWS App Mesh service mesh implementation for cross-service communication'
+
+Parameters:
+  MeshName:
+    Type: String
+    Default: 'devops-service-mesh'
+    Description: 'Name of the App Mesh'
+
+  VpcId:
+    Type: String
+    Description: 'VPC ID for the service mesh'
+
+  PrivateSubnet1Id:
+    Type: String
+    Description: 'Private subnet 1 ID'
+
+  PrivateSubnet2Id:
+    Type: String
+    Description: 'Private subnet 2 ID'
+
+Resources:
+  # App Mesh
+  ServiceMesh:
+    Type: AWS::AppMesh::Mesh
+    Properties:
+      MeshName: !Ref MeshName
+      Spec:
+        EgressFilter:
+          Type: ALLOW_ALL
+
+  # Virtual Nodes
+  FrontendVirtualNode:
+    Type: AWS::AppMesh::VirtualNode
+    Properties:
+      MeshName: !Ref ServiceMesh
+      VirtualNodeName: 'frontend-service'
+      Spec:
+        Listeners:
+          - PortMapping:
+              Port: 3000
+              Protocol: http
+            HealthCheck:
+              Protocol: http
+              Path: '/health'
+              HealthyThreshold: 2
+              UnhealthyThreshold: 3
+              TimeoutMillis: 2000
+              IntervalMillis: 5000
+        ServiceDiscovery:
+          DNS:
+            Hostname: 'frontend.devops-service-mesh.local'
+        Backends:
+          - VirtualService:
+              VirtualServiceName: 'backend-service'
+
+  BackendVirtualNode:
+    Type: AWS::AppMesh::VirtualNode
+    Properties:
+      MeshName: !Ref ServiceMesh
+      VirtualNodeName: 'backend-service'
+      Spec:
+        Listeners:
+          - PortMapping:
+              Port: 8080
+              Protocol: http
+            HealthCheck:
+              Protocol: http
+              Path: '/health'
+              HealthyThreshold: 2
+              UnhealthyThreshold: 3
+              TimeoutMillis: 2000
+              IntervalMillis: 5000
+        ServiceDiscovery:
+          DNS:
+            Hostname: 'backend.devops-service-mesh.local'
+        Backends:
+          - VirtualService:
+              VirtualServiceName: 'database-service'
+
+  DatabaseVirtualNode:
+    Type: AWS::AppMesh::VirtualNode
+    Properties:
+      MeshName: !Ref ServiceMesh
+      VirtualNodeName: 'database-service'
+      Spec:
+        Listeners:
+          - PortMapping:
+              Port: 5432
+              Protocol: tcp
+            HealthCheck:
+              Protocol: tcp
+              HealthyThreshold: 2
+              UnhealthyThreshold: 3
+              TimeoutMillis: 2000
+              IntervalMillis: 5000
+        ServiceDiscovery:
+          DNS:
+            Hostname: 'database.devops-service-mesh.local'
+
+  # Virtual Services
+  FrontendVirtualService:
+    Type: AWS::AppMesh::VirtualService
+    Properties:
+      MeshName: !Ref ServiceMesh
+      VirtualServiceName: 'frontend-service'
+      Spec:
+        Provider:
+          VirtualNode:
+            VirtualNodeName: !GetAtt FrontendVirtualNode.VirtualNodeName
+
+  BackendVirtualService:
+    Type: AWS::AppMesh::VirtualService
+    Properties:
+      MeshName: !Ref ServiceMesh
+      VirtualServiceName: 'backend-service'
+      Spec:
+        Provider:
+          VirtualRouter:
+            VirtualRouterName: !GetAtt BackendVirtualRouter.VirtualRouterName
+
+  DatabaseVirtualService:
+    Type: AWS::AppMesh::VirtualService
+    Properties:
+      MeshName: !Ref ServiceMesh
+      VirtualServiceName: 'database-service'
+      Spec:
+        Provider:
+          VirtualNode:
+            VirtualNodeName: !GetAtt DatabaseVirtualNode.VirtualNodeName
+
+  # Virtual Router for Backend Service (for traffic splitting)
+  BackendVirtualRouter:
+    Type: AWS::AppMesh::VirtualRouter
+    Properties:
+      MeshName: !Ref ServiceMesh
+      VirtualRouterName: 'backend-router'
+      Spec:
+        Listeners:
+          - PortMapping:
+              Port: 8080
+              Protocol: http
+
+  # Routes
+  BackendRoute:
+    Type: AWS::AppMesh::Route
+    Properties:
+      MeshName: !Ref ServiceMesh
+      VirtualRouterName: !GetAtt BackendVirtualRouter.VirtualRouterName
+      RouteName: 'backend-route'
+      Spec:
+        HttpRoute:
+          Match:
+            Prefix: '/'
+          Action:
+            WeightedTargets:
+              - VirtualNode: !GetAtt BackendVirtualNode.VirtualNodeName
+                Weight: 100
+          RetryPolicy:
+            MaxRetries: 3
+            PerRetryTimeout:
+              Unit: ms
+              Value: 2000
+            HttpRetryEvents:
+              - server-error
+              - client-error
+              - gateway-error
+          Timeout:
+            PerRequest:
+              Unit: ms
+              Value: 5000
+
+  # ECS Cluster for services
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Sub '${MeshName}-cluster'
+      CapacityProviders:
+        - FARGATE
+      DefaultCapacityProviderStrategy:
+        - CapacityProvider: FARGATE
+          Weight: 1
+      ClusterSettings:
+        - Name: containerInsights
+          Value: enabled
+
+  # Security Groups
+  ServiceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: 'Security group for mesh services'
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3000
+          ToPort: 3000
+          SourceSecurityGroupId: !Ref ALBSecurityGroup
+        - IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          CidrIp: 10.0.0.0/16
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          CidrIp: 10.0.0.0/16
+        - IpProtocol: tcp
+          FromPort: 9901
+          ToPort: 9901
+          CidrIp: 10.0.0.0/16  # Envoy admin port
+
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: 'Security group for Application Load Balancer'
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+
+  # Application Load Balancer
+  ApplicationLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub '${MeshName}-alb'
+      Scheme: internet-facing
+      Type: application
+      Subnets:
+        - !Ref PrivateSubnet1Id
+        - !Ref PrivateSubnet2Id
+      SecurityGroups:
+        - !Ref ALBSecurityGroup
+
+  ALBTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub '${MeshName}-frontend-tg'
+      Port: 3000
+      Protocol: HTTP
+      VpcId: !Ref VpcId
+      TargetType: ip
+      HealthCheckPath: '/health'
+      HealthCheckProtocol: HTTP
+      HealthCheckIntervalSeconds: 30
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+
+  ALBListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref ALBTargetGroup
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Port: 80
+      Protocol: HTTP
+
+  # IAM Roles
+  ECSTaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+
+  ECSTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: AppMeshEnvoyAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - appmesh:StreamAggregatedResources
+                Resource: '*'
+        - PolicyName: CloudWatchLogs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: '*'
+
+  # Task Definitions
+  FrontendTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: 'frontend-service'
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      Cpu: 512
+      Memory: 1024
+      ExecutionRoleArn: !GetAtt ECSTaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt ECSTaskRole.Arn
+      ProxyConfiguration:
+        Type: APPMESH
+        ContainerName: envoy
+        ProxyConfigurationProperties:
+          - Name: IgnoredUID
+            Value: '1337'
+          - Name: ProxyIngressPort
+            Value: '15000'
+          - Name: ProxyEgressPort
+            Value: '15001'
+          - Name: AppPorts
+            Value: '3000'
+          - Name: EgressIgnoredIPs
+            Value: '169.254.170.2,169.254.169.254'
+      ContainerDefinitions:
+        - Name: frontend-app
+          Image: 'nginx:latest'
+          PortMappings:
+            - ContainerPort: 3000
+              Protocol: tcp
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref FrontendLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: ecs
+          Environment:
+            - Name: BACKEND_URL
+              Value: 'http://backend-service:8080'
+          DependsOn:
+            - ContainerName: envoy
+              Condition: HEALTHY
+        - Name: envoy
+          Image: !Sub '840364872350.dkr.ecr.${AWS::Region}.amazonaws.com/aws-appmesh-envoy:v1.22.2.0-prod'
+          Essential: true
+          User: '1337'
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref FrontendLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: envoy
+          Environment:
+            - Name: APPMESH_VIRTUAL_NODE_NAME
+              Value: !Sub 'mesh/${MeshName}/virtualNode/frontend-service'
+            - Name: ENVOY_LOG_LEVEL
+              Value: info
+          HealthCheck:
+            Command:
+              - CMD-SHELL
+              - 'curl -s http://localhost:9901/server_info | grep state | grep -q LIVE'
+            Interval: 5
+            Timeout: 2
+            Retries: 3
+            StartPeriod: 10
+
+  BackendTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: 'backend-service'
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      Cpu: 512
+      Memory: 1024
+      ExecutionRoleArn: !GetAtt ECSTaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt ECSTaskRole.Arn
+      ProxyConfiguration:
+        Type: APPMESH
+        ContainerName: envoy
+        ProxyConfigurationProperties:
+          - Name: IgnoredUID
+            Value: '1337'
+          - Name: ProxyIngressPort
+            Value: '15000'
+          - Name: ProxyEgressPort
+            Value: '15001'
+          - Name: AppPorts
+            Value: '8080'
+          - Name: EgressIgnoredIPs
+            Value: '169.254.170.2,169.254.169.254'
+      ContainerDefinitions:
+        - Name: backend-app
+          Image: 'httpd:latest'
+          PortMappings:
+            - ContainerPort: 8080
+              Protocol: tcp
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref BackendLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: ecs
+          Environment:
+            - Name: DATABASE_URL
+              Value: 'postgresql://database-service:5432/appdb'
+          DependsOn:
+            - ContainerName: envoy
+              Condition: HEALTHY
+        - Name: envoy
+          Image: !Sub '840364872350.dkr.ecr.${AWS::Region}.amazonaws.com/aws-appmesh-envoy:v1.22.2.0-prod'
+          Essential: true
+          User: '1337'
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref BackendLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: envoy
+          Environment:
+            - Name: APPMESH_VIRTUAL_NODE_NAME
+              Value: !Sub 'mesh/${MeshName}/virtualNode/backend-service'
+            - Name: ENVOY_LOG_LEVEL
+              Value: info
+          HealthCheck:
+            Command:
+              - CMD-SHELL
+              - 'curl -s http://localhost:9901/server_info | grep state | grep -q LIVE'
+            Interval: 5
+            Timeout: 2
+            Retries: 3
+            StartPeriod: 10
+
+  DatabaseTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: 'database-service'
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      Cpu: 512
+      Memory: 1024
+      ExecutionRoleArn: !GetAtt ECSTaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt ECSTaskRole.Arn
+      ProxyConfiguration:
+        Type: APPMESH
+        ContainerName: envoy
+        ProxyConfigurationProperties:
+          - Name: IgnoredUID
+            Value: '1337'
+          - Name: ProxyIngressPort
+            Value: '15000'
+          - Name: ProxyEgressPort
+            Value: '15001'
+          - Name: AppPorts
+            Value: '5432'
+          - Name: EgressIgnoredIPs
+            Value: '169.254.170.2,169.254.169.254'
+      ContainerDefinitions:
+        - Name: database-app
+          Image: 'postgres:13'
+          PortMappings:
+            - ContainerPort: 5432
+              Protocol: tcp
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref DatabaseLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: ecs
+          Environment:
+            - Name: POSTGRES_DB
+              Value: 'appdb'
+            - Name: POSTGRES_USER
+              Value: 'appuser'
+            - Name: POSTGRES_PASSWORD
+              Value: 'apppassword'
+          DependsOn:
+            - ContainerName: envoy
+              Condition: HEALTHY
+        - Name: envoy
+          Image: !Sub '840364872350.dkr.ecr.${AWS::Region}.amazonaws.com/aws-appmesh-envoy:v1.22.2.0-prod'
+          Essential: true
+          User: '1337'
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref DatabaseLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: envoy
+          Environment:
+            - Name: APPMESH_VIRTUAL_NODE_NAME
+              Value: !Sub 'mesh/${MeshName}/virtualNode/database-service'
+            - Name: ENVOY_LOG_LEVEL
+              Value: info
+          HealthCheck:
+            Command:
+              - CMD-SHELL
+              - 'curl -s http://localhost:9901/server_info | grep state | grep -q LIVE'
+            Interval: 5
+            Timeout: 2
+            Retries: 3
+            StartPeriod: 10
+
+  # ECS Services
+  FrontendService:
+    Type: AWS::ECS::Service
+    DependsOn: ALBListener
+    Properties:
+      ServiceName: 'frontend-service'
+      Cluster: !Ref ECSCluster
+      TaskDefinition: !Ref FrontendTaskDefinition
+      DesiredCount: 2
+      LaunchType: FARGATE
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          SecurityGroups:
+            - !Ref ServiceSecurityGroup
+          Subnets:
+            - !Ref PrivateSubnet1Id
+            - !Ref PrivateSubnet2Id
+          AssignPublicIp: DISABLED
+      LoadBalancers:
+        - ContainerName: frontend-app
+          ContainerPort: 3000
+          TargetGroupArn: !Ref ALBTargetGroup
+      ServiceRegistries:
+        - RegistryArn: !GetAtt FrontendServiceDiscovery.Arn
+
+  BackendService:
+    Type: AWS::ECS::Service
+    Properties:
+      ServiceName: 'backend-service'
+      Cluster: !Ref ECSCluster
+      TaskDefinition: !Ref BackendTaskDefinition
+      DesiredCount: 2
+      LaunchType: FARGATE
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          SecurityGroups:
+            - !Ref ServiceSecurityGroup
+          Subnets:
+            - !Ref PrivateSubnet1Id
+            - !Ref PrivateSubnet2Id
+          AssignPublicIp: DISABLED
+      ServiceRegistries:
+        - RegistryArn: !GetAtt BackendServiceDiscovery.Arn
+
+  DatabaseService:
+    Type: AWS::ECS::Service
+    Properties:
+      ServiceName: 'database-service'
+      Cluster: !Ref ECSCluster
+      TaskDefinition: !Ref DatabaseTaskDefinition
+      DesiredCount: 1
+      LaunchType: FARGATE
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          SecurityGroups:
+            - !Ref ServiceSecurityGroup
+          Subnets:
+            - !Ref PrivateSubnet1Id
+            - !Ref PrivateSubnet2Id
+          AssignPublicIp: DISABLED
+      ServiceRegistries:
+        - RegistryArn: !GetAtt DatabaseServiceDiscovery.Arn
+
+  # Service Discovery
+  ServiceDiscoveryNamespace:
+    Type: AWS::ServiceDiscovery::PrivateDnsNamespace
+    Properties:
+      Name: 'devops-service-mesh.local'
+      Vpc: !Ref VpcId
+
+  FrontendServiceDiscovery:
+    Type: AWS::ServiceDiscovery::Service
+    Properties:
+      Name: 'frontend'
+      DnsConfig:
+        DnsRecords:
+          - Type: A
+            TTL: 60
+        NamespaceId: !Ref ServiceDiscoveryNamespace
+      HealthCheckCustomConfig:
+        FailureThreshold: 1
+
+  BackendServiceDiscovery:
+    Type: AWS::ServiceDiscovery::Service
+    Properties:
+      Name: 'backend'
+      DnsConfig:
+        DnsRecords:
+          - Type: A
+            TTL: 60
+        NamespaceId: !Ref ServiceDiscoveryNamespace
+      HealthCheckCustomConfig:
+        FailureThreshold: 1
+
+  DatabaseServiceDiscovery:
+    Type: AWS::ServiceDiscovery::Service
+    Properties:
+      Name: 'database'
+      DnsConfig:
+        DnsRecords:
+          - Type: A
+            TTL: 60
+        NamespaceId: !Ref ServiceDiscoveryNamespace
+      HealthCheckCustomConfig:
+        FailureThreshold: 1
+
+  # CloudWatch Log Groups
+  FrontendLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: '/ecs/frontend-service'
+      RetentionInDays: 7
+
+  BackendLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: '/ecs/backend-service'
+      RetentionInDays: 7
+
+  DatabaseLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: '/ecs/database-service'
+      RetentionInDays: 7
+
+Outputs:
+  MeshName:
+    Description: 'App Mesh Name'
+    Value: !Ref ServiceMesh
+    Export:
+      Name: !Sub '${AWS::StackName}-Mesh-Name'
+
+  MeshArn:
+    Description: 'App Mesh ARN'
+    Value: !Ref ServiceMesh
+    Export:
+      Name: !Sub '${AWS::StackName}-Mesh-ARN'
+
+  LoadBalancerDNS:
+    Description: 'Application Load Balancer DNS Name'
+    Value: !GetAtt ApplicationLoadBalancer.DNSName
+    Export:
+      Name: !Sub '${AWS::StackName}-ALB-DNS'
+
+  ECSClusterName:
+    Description: 'ECS Cluster Name'
+    Value: !Ref ECSCluster
+    Export:
+      Name: !Sub '${AWS::StackName}-ECSCluster-Name'
+
+  ServiceDiscoveryNamespaceId:
+    Description: 'Service Discovery Namespace ID'
+    Value: !Ref ServiceDiscoveryNamespace
+    Export:
+      Name: !Sub '${AWS::StackName}-ServiceDiscovery-NamespaceId'

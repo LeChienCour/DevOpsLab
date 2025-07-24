@@ -1,0 +1,422 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'AWS App Mesh infrastructure for cross-service communication lab'
+
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC ID where the mesh will be deployed
+  
+  PrivateSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Private subnet IDs for ECS services
+  
+  ClusterName:
+    Type: String
+    Default: cross-service-cluster
+    Description: Name of the ECS cluster
+
+Resources:
+  # App Mesh
+  ServiceMesh:
+    Type: AWS::AppMesh::Mesh
+    Properties:
+      MeshName: cross-service-mesh
+      Spec:
+        EgressFilter:
+          Type: ALLOW_ALL
+
+  # Virtual Gateway for external traffic
+  VirtualGateway:
+    Type: AWS::AppMesh::VirtualGateway
+    Properties:
+      MeshName: !Ref ServiceMesh
+      VirtualGatewayName: cross-service-gateway
+      Spec:
+        Listeners:
+          - PortMapping:
+              Port: 8080
+              Protocol: http
+        Logging:
+          AccessLog:
+            Format:
+              Text: |
+                [%START_TIME%] "%REQ(:METHOD)% %REQ(X-ENVOY-ORIGINAL-PATH?:PATH)% %PROTOCOL%"
+                %RESPONSE_CODE% %RESPONSE_FLAGS% %BYTES_RECEIVED% %BYTES_SENT%
+                %DURATION% %RESP(X-ENVOY-UPSTREAM-SERVICE-TIME)% "%REQ(X-FORWARDED-FOR)%"
+                "%REQ(USER-AGENT)%" "%REQ(X-REQUEST-ID)%" "%REQ(:AUTHORITY)%" "%UPSTREAM_HOST%"
+
+  # Virtual Services
+  UserVirtualService:
+    Type: AWS::AppMesh::VirtualService
+    Properties:
+      MeshName: !Ref ServiceMesh
+      VirtualServiceName: user-service.local
+      Spec:
+        Provider:
+          VirtualRouter:
+            VirtualRouterName: !Ref UserVirtualRouter
+
+  OrderVirtualService:
+    Type: AWS::AppMesh::VirtualService
+    Properties:
+      MeshName: !Ref ServiceMesh
+      VirtualServiceName: order-service.local
+      Spec:
+        Provider:
+          VirtualRouter:
+            VirtualRouterName: !Ref OrderVirtualRouter
+
+  InventoryVirtualService:
+    Type: AWS::AppMesh::VirtualService
+    Properties:
+      MeshName: !Ref ServiceMesh
+      VirtualServiceName: inventory-service.local
+      Spec:
+        Provider:
+          VirtualRouter:
+            VirtualRouterName: !Ref InventoryVirtualRouter
+
+  NotificationVirtualService:
+    Type: AWS::AppMesh::VirtualService
+    Properties:
+      MeshName: !Ref ServiceMesh
+      VirtualServiceName: notification-service.local
+      Spec:
+        Provider:
+          VirtualRouter:
+            VirtualRouterName: !Ref NotificationVirtualRouter
+
+  # Virtual Routers
+  UserVirtualRouter:
+    Type: AWS::AppMesh::VirtualRouter
+    Properties:
+      MeshName: !Ref ServiceMesh
+      VirtualRouterName: user-router
+      Spec:
+        Listeners:
+          - PortMapping:
+              Port: 8080
+              Protocol: http
+
+  OrderVirtualRouter:
+    Type: AWS::AppMesh::VirtualRouter
+    Properties:
+      MeshName: !Ref ServiceMesh
+      VirtualRouterName: order-router
+      Spec:
+        Listeners:
+          - PortMapping:
+              Port: 8080
+              Protocol: http
+
+  InventoryVirtualRouter:
+    Type: AWS::AppMesh::VirtualRouter
+    Properties:
+      MeshName: !Ref ServiceMesh
+      VirtualRouterName: inventory-router
+      Spec:
+        Listeners:
+          - PortMapping:
+              Port: 8080
+              Protocol: http
+
+  NotificationVirtualRouter:
+    Type: AWS::AppMesh::VirtualRouter
+    Properties:
+      MeshName: !Ref ServiceMesh
+      VirtualRouterName: notification-router
+      Spec:
+        Listeners:
+          - PortMapping:
+              Port: 8080
+              Protocol: http
+
+  # Virtual Nodes
+  UserVirtualNode:
+    Type: AWS::AppMesh::VirtualNode
+    Properties:
+      MeshName: !Ref ServiceMesh
+      VirtualNodeName: user-node
+      Spec:
+        Listeners:
+          - PortMapping:
+              Port: 8080
+              Protocol: http
+            HealthCheck:
+              Protocol: http
+              Path: /health
+              HealthyThreshold: 2
+              UnhealthyThreshold: 3
+              TimeoutMillis: 2000
+              IntervalMillis: 5000
+        ServiceDiscovery:
+          AWSCloudMap:
+            NamespaceName: cross-service.local
+            ServiceName: user-service
+        Backends:
+          - VirtualService:
+              VirtualServiceName: inventory-service.local
+        Logging:
+          AccessLog:
+            Format:
+              Text: |
+                [%START_TIME%] "%REQ(:METHOD)% %REQ(X-ENVOY-ORIGINAL-PATH?:PATH)% %PROTOCOL%"
+                %RESPONSE_CODE% %RESPONSE_FLAGS% %BYTES_RECEIVED% %BYTES_SENT%
+                %DURATION% %RESP(X-ENVOY-UPSTREAM-SERVICE-TIME)% "%REQ(X-FORWARDED-FOR)%"
+                "%REQ(USER-AGENT)%" "%REQ(X-REQUEST-ID)%" "%REQ(:AUTHORITY)%" "%UPSTREAM_HOST%"
+
+  OrderVirtualNode:
+    Type: AWS::AppMesh::VirtualNode
+    Properties:
+      MeshName: !Ref ServiceMesh
+      VirtualNodeName: order-node
+      Spec:
+        Listeners:
+          - PortMapping:
+              Port: 8080
+              Protocol: http
+            HealthCheck:
+              Protocol: http
+              Path: /health
+              HealthyThreshold: 2
+              UnhealthyThreshold: 3
+              TimeoutMillis: 2000
+              IntervalMillis: 5000
+        ServiceDiscovery:
+          AWSCloudMap:
+            NamespaceName: cross-service.local
+            ServiceName: order-service
+        Backends:
+          - VirtualService:
+              VirtualServiceName: user-service.local
+          - VirtualService:
+              VirtualServiceName: inventory-service.local
+          - VirtualService:
+              VirtualServiceName: notification-service.local
+        Logging:
+          AccessLog:
+            Format:
+              Text: |
+                [%START_TIME%] "%REQ(:METHOD)% %REQ(X-ENVOY-ORIGINAL-PATH?:PATH)% %PROTOCOL%"
+                %RESPONSE_CODE% %RESPONSE_FLAGS% %BYTES_RECEIVED% %BYTES_SENT%
+                %DURATION% %RESP(X-ENVOY-UPSTREAM-SERVICE-TIME)% "%REQ(X-FORWARDED-FOR)%"
+                "%REQ(USER-AGENT)%" "%REQ(X-REQUEST-ID)%" "%REQ(:AUTHORITY)%" "%UPSTREAM_HOST%"
+
+  InventoryVirtualNode:
+    Type: AWS::AppMesh::VirtualNode
+    Properties:
+      MeshName: !Ref ServiceMesh
+      VirtualNodeName: inventory-node
+      Spec:
+        Listeners:
+          - PortMapping:
+              Port: 8080
+              Protocol: http
+            HealthCheck:
+              Protocol: http
+              Path: /health
+              HealthyThreshold: 2
+              UnhealthyThreshold: 3
+              TimeoutMillis: 2000
+              IntervalMillis: 5000
+        ServiceDiscovery:
+          AWSCloudMap:
+            NamespaceName: cross-service.local
+            ServiceName: inventory-service
+        Logging:
+          AccessLog:
+            Format:
+              Text: |
+                [%START_TIME%] "%REQ(:METHOD)% %REQ(X-ENVOY-ORIGINAL-PATH?:PATH)% %PROTOCOL%"
+                %RESPONSE_CODE% %RESPONSE_FLAGS% %BYTES_RECEIVED% %BYTES_SENT%
+                %DURATION% %RESP(X-ENVOY-UPSTREAM-SERVICE-TIME)% "%REQ(X-FORWARDED-FOR)%"
+                "%REQ(USER-AGENT)%" "%REQ(X-REQUEST-ID)%" "%REQ(:AUTHORITY)%" "%UPSTREAM_HOST%"
+
+  NotificationVirtualNode:
+    Type: AWS::AppMesh::VirtualNode
+    Properties:
+      MeshName: !Ref ServiceMesh
+      VirtualNodeName: notification-node
+      Spec:
+        Listeners:
+          - PortMapping:
+              Port: 8080
+              Protocol: http
+            HealthCheck:
+              Protocol: http
+              Path: /health
+              HealthyThreshold: 2
+              UnhealthyThreshold: 3
+              TimeoutMillis: 2000
+              IntervalMillis: 5000
+        ServiceDiscovery:
+          AWSCloudMap:
+            NamespaceName: cross-service.local
+            ServiceName: notification-service
+        Logging:
+          AccessLog:
+            Format:
+              Text: |
+                [%START_TIME%] "%REQ(:METHOD)% %REQ(X-ENVOY-ORIGINAL-PATH?:PATH)% %PROTOCOL%"
+                %RESPONSE_CODE% %RESPONSE_FLAGS% %BYTES_RECEIVED% %BYTES_SENT%
+                %DURATION% %RESP(X-ENVOY-UPSTREAM-SERVICE-TIME)% "%REQ(X-FORWARDED-FOR)%"
+                "%REQ(USER-AGENT)%" "%REQ(X-REQUEST-ID)%" "%REQ(:AUTHORITY)%" "%UPSTREAM_HOST%"
+
+  # Routes
+  UserRoute:
+    Type: AWS::AppMesh::Route
+    Properties:
+      MeshName: !Ref ServiceMesh
+      VirtualRouterName: !Ref UserVirtualRouter
+      RouteName: user-route
+      Spec:
+        HttpRoute:
+          Match:
+            Prefix: /
+          Action:
+            WeightedTargets:
+              - VirtualNode: !Ref UserVirtualNode
+                Weight: 100
+
+  OrderRoute:
+    Type: AWS::AppMesh::Route
+    Properties:
+      MeshName: !Ref ServiceMesh
+      VirtualRouterName: !Ref OrderVirtualRouter
+      RouteName: order-route
+      Spec:
+        HttpRoute:
+          Match:
+            Prefix: /
+          Action:
+            WeightedTargets:
+              - VirtualNode: !Ref OrderVirtualNode
+                Weight: 100
+
+  InventoryRoute:
+    Type: AWS::AppMesh::Route
+    Properties:
+      MeshName: !Ref ServiceMesh
+      VirtualRouterName: !Ref InventoryVirtualRouter
+      RouteName: inventory-route
+      Spec:
+        HttpRoute:
+          Match:
+            Prefix: /
+          Action:
+            WeightedTargets:
+              - VirtualNode: !Ref InventoryVirtualNode
+                Weight: 100
+
+  NotificationRoute:
+    Type: AWS::AppMesh::Route
+    Properties:
+      MeshName: !Ref ServiceMesh
+      VirtualRouterName: !Ref NotificationVirtualRouter
+      RouteName: notification-route
+      Spec:
+        HttpRoute:
+          Match:
+            Prefix: /
+          Action:
+            WeightedTargets:
+              - VirtualNode: !Ref NotificationVirtualNode
+                Weight: 100
+
+  # Cloud Map Namespace
+  ServiceDiscoveryNamespace:
+    Type: AWS::ServiceDiscovery::PrivateDnsNamespace
+    Properties:
+      Name: cross-service.local
+      Vpc: !Ref VpcId
+      Description: Service discovery namespace for cross-service communication lab
+
+  # Cloud Map Services
+  UserServiceDiscovery:
+    Type: AWS::ServiceDiscovery::Service
+    Properties:
+      Name: user-service
+      NamespaceId: !Ref ServiceDiscoveryNamespace
+      DnsConfig:
+        DnsRecords:
+          - Type: A
+            TTL: 60
+        RoutingPolicy: MULTIVALUE
+      HealthCheckCustomConfig:
+        FailureThreshold: 1
+
+  OrderServiceDiscovery:
+    Type: AWS::ServiceDiscovery::Service
+    Properties:
+      Name: order-service
+      NamespaceId: !Ref ServiceDiscoveryNamespace
+      DnsConfig:
+        DnsRecords:
+          - Type: A
+            TTL: 60
+        RoutingPolicy: MULTIVALUE
+      HealthCheckCustomConfig:
+        FailureThreshold: 1
+
+  InventoryServiceDiscovery:
+    Type: AWS::ServiceDiscovery::Service
+    Properties:
+      Name: inventory-service
+      NamespaceId: !Ref ServiceDiscoveryNamespace
+      DnsConfig:
+        DnsRecords:
+          - Type: A
+            TTL: 60
+        RoutingPolicy: MULTIVALUE
+      HealthCheckCustomConfig:
+        FailureThreshold: 1
+
+  NotificationServiceDiscovery:
+    Type: AWS::ServiceDiscovery::Service
+    Properties:
+      Name: notification-service
+      NamespaceId: !Ref ServiceDiscoveryNamespace
+      DnsConfig:
+        DnsRecords:
+          - Type: A
+            TTL: 60
+        RoutingPolicy: MULTIVALUE
+      HealthCheckCustomConfig:
+        FailureThreshold: 1
+
+Outputs:
+  MeshName:
+    Description: Name of the App Mesh
+    Value: !Ref ServiceMesh
+    Export:
+      Name: !Sub ${AWS::StackName}-MeshName
+
+  ServiceDiscoveryNamespaceId:
+    Description: Service Discovery Namespace ID
+    Value: !Ref ServiceDiscoveryNamespace
+    Export:
+      Name: !Sub ${AWS::StackName}-NamespaceId
+
+  UserServiceDiscoveryId:
+    Description: User Service Discovery Service ID
+    Value: !Ref UserServiceDiscovery
+    Export:
+      Name: !Sub ${AWS::StackName}-UserServiceId
+
+  OrderServiceDiscoveryId:
+    Description: Order Service Discovery Service ID
+    Value: !Ref OrderServiceDiscovery
+    Export:
+      Name: !Sub ${AWS::StackName}-OrderServiceId
+
+  InventoryServiceDiscoveryId:
+    Description: Inventory Service Discovery Service ID
+    Value: !Ref InventoryServiceDiscovery
+    Export:
+      Name: !Sub ${AWS::StackName}-InventoryServiceId
+
+  NotificationServiceDiscoveryId:
+    Description: Notification Service Discovery Service ID
+    Value: !Ref NotificationServiceDiscovery
+    Export:
+      Name: !Sub ${AWS::StackName}-NotificationServiceId

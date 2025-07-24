@@ -1,0 +1,383 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'SQS and SNS messaging infrastructure for cross-service communication lab'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: lab
+    Description: Environment name for resource tagging
+
+Resources:
+  # SNS Topics
+  OrderEventsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: order-events
+      DisplayName: Order Events Topic
+      FifoTopic: false
+      KmsMasterKeyId: alias/aws/sns
+
+  UserEventsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: user-events
+      DisplayName: User Events Topic
+      FifoTopic: false
+      KmsMasterKeyId: alias/aws/sns
+
+  InventoryEventsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: inventory-events
+      DisplayName: Inventory Events Topic
+      FifoTopic: false
+      KmsMasterKeyId: alias/aws/sns
+
+  # SQS Queues for Order Processing
+  OrderProcessingQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: order-processing-queue
+      VisibilityTimeoutSeconds: 300
+      MessageRetentionPeriod: 1209600  # 14 days
+      ReceiveMessageWaitTimeSeconds: 20  # Long polling
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt OrderProcessingDLQ.Arn
+        maxReceiveCount: 3
+      KmsMasterKeyId: alias/aws/sqs
+
+  OrderProcessingDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: order-processing-dlq
+      MessageRetentionPeriod: 1209600  # 14 days
+      KmsMasterKeyId: alias/aws/sqs
+
+  # SQS Queues for Inventory Management
+  InventoryUpdateQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: inventory-update-queue
+      VisibilityTimeoutSeconds: 180
+      MessageRetentionPeriod: 1209600
+      ReceiveMessageWaitTimeSeconds: 20
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt InventoryUpdateDLQ.Arn
+        maxReceiveCount: 3
+      KmsMasterKeyId: alias/aws/sqs
+
+  InventoryUpdateDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: inventory-update-dlq
+      MessageRetentionPeriod: 1209600
+      KmsMasterKeyId: alias/aws/sqs
+
+  # SQS Queues for Notifications
+  NotificationQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: notification-queue
+      VisibilityTimeoutSeconds: 120
+      MessageRetentionPeriod: 1209600
+      ReceiveMessageWaitTimeSeconds: 20
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt NotificationDLQ.Arn
+        maxReceiveCount: 5
+      KmsMasterKeyId: alias/aws/sqs
+
+  NotificationDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: notification-dlq
+      MessageRetentionPeriod: 1209600
+      KmsMasterKeyId: alias/aws/sqs
+
+  # SQS Queue for Analytics
+  AnalyticsQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: analytics-queue
+      VisibilityTimeoutSeconds: 600
+      MessageRetentionPeriod: 1209600
+      ReceiveMessageWaitTimeSeconds: 20
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt AnalyticsDLQ.Arn
+        maxReceiveCount: 2
+      KmsMasterKeyId: alias/aws/sqs
+
+  AnalyticsDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: analytics-dlq
+      MessageRetentionPeriod: 1209600
+      KmsMasterKeyId: alias/aws/sqs
+
+  # SNS Subscriptions
+  OrderProcessingSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref OrderEventsTopic
+      Protocol: sqs
+      Endpoint: !GetAtt OrderProcessingQueue.Arn
+      FilterPolicy:
+        eventType:
+          - order_created
+          - order_updated
+          - order_cancelled
+
+  InventoryUpdateSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref OrderEventsTopic
+      Protocol: sqs
+      Endpoint: !GetAtt InventoryUpdateQueue.Arn
+      FilterPolicy:
+        eventType:
+          - order_created
+          - order_cancelled
+
+  NotificationSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref OrderEventsTopic
+      Protocol: sqs
+      Endpoint: !GetAtt NotificationQueue.Arn
+      FilterPolicy:
+        eventType:
+          - order_created
+          - order_shipped
+          - order_delivered
+          - order_cancelled
+
+  UserNotificationSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref UserEventsTopic
+      Protocol: sqs
+      Endpoint: !GetAtt NotificationQueue.Arn
+      FilterPolicy:
+        eventType:
+          - user_registered
+          - user_updated
+          - password_reset
+
+  InventoryAnalyticsSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref InventoryEventsTopic
+      Protocol: sqs
+      Endpoint: !GetAtt AnalyticsQueue.Arn
+
+  OrderAnalyticsSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref OrderEventsTopic
+      Protocol: sqs
+      Endpoint: !GetAtt AnalyticsQueue.Arn
+
+  # Queue Policies
+  OrderProcessingQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
+        - !Ref OrderProcessingQueue
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: sns.amazonaws.com
+            Action: sqs:SendMessage
+            Resource: !GetAtt OrderProcessingQueue.Arn
+            Condition:
+              ArnEquals:
+                aws:SourceArn: !Ref OrderEventsTopic
+
+  InventoryUpdateQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
+        - !Ref InventoryUpdateQueue
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: sns.amazonaws.com
+            Action: sqs:SendMessage
+            Resource: !GetAtt InventoryUpdateQueue.Arn
+            Condition:
+              ArnEquals:
+                aws:SourceArn: !Ref OrderEventsTopic
+
+  NotificationQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
+        - !Ref NotificationQueue
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: sns.amazonaws.com
+            Action: sqs:SendMessage
+            Resource: !GetAtt NotificationQueue.Arn
+            Condition:
+              ArnEquals:
+                aws:SourceArn: 
+                  - !Ref OrderEventsTopic
+                  - !Ref UserEventsTopic
+
+  AnalyticsQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
+        - !Ref AnalyticsQueue
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: sns.amazonaws.com
+            Action: sqs:SendMessage
+            Resource: !GetAtt AnalyticsQueue.Arn
+            Condition:
+              ArnEquals:
+                aws:SourceArn: 
+                  - !Ref OrderEventsTopic
+                  - !Ref InventoryEventsTopic
+
+  # CloudWatch Alarms for Queue Monitoring
+  OrderProcessingQueueDepthAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: OrderProcessingQueue-HighDepth
+      AlarmDescription: Alert when order processing queue depth is high
+      MetricName: ApproximateNumberOfVisibleMessages
+      Namespace: AWS/SQS
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 100
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt OrderProcessingQueue.QueueName
+
+  OrderProcessingDLQAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: OrderProcessingDLQ-MessagesReceived
+      AlarmDescription: Alert when messages appear in order processing DLQ
+      MetricName: ApproximateNumberOfVisibleMessages
+      Namespace: AWS/SQS
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt OrderProcessingDLQ.QueueName
+
+  # IAM Role for Services to Access Messaging
+  MessagingServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: CrossServiceMessagingRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ecs-tasks.amazonaws.com
+                - lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: MessagingAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                  - sns:Subscribe
+                  - sns:Unsubscribe
+                Resource:
+                  - !Ref OrderEventsTopic
+                  - !Ref UserEventsTopic
+                  - !Ref InventoryEventsTopic
+              - Effect: Allow
+                Action:
+                  - sqs:SendMessage
+                  - sqs:ReceiveMessage
+                  - sqs:DeleteMessage
+                  - sqs:GetQueueAttributes
+                  - sqs:ChangeMessageVisibility
+                Resource:
+                  - !GetAtt OrderProcessingQueue.Arn
+                  - !GetAtt InventoryUpdateQueue.Arn
+                  - !GetAtt NotificationQueue.Arn
+                  - !GetAtt AnalyticsQueue.Arn
+                  - !GetAtt OrderProcessingDLQ.Arn
+                  - !GetAtt InventoryUpdateDLQ.Arn
+                  - !GetAtt NotificationDLQ.Arn
+                  - !GetAtt AnalyticsDLQ.Arn
+              - Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:GenerateDataKey
+                Resource: 
+                  - !Sub arn:aws:kms:${AWS::Region}:${AWS::AccountId}:alias/aws/sns
+                  - !Sub arn:aws:kms:${AWS::Region}:${AWS::AccountId}:alias/aws/sqs
+
+Outputs:
+  OrderEventsTopicArn:
+    Description: ARN of the Order Events SNS Topic
+    Value: !Ref OrderEventsTopic
+    Export:
+      Name: !Sub ${AWS::StackName}-OrderEventsTopicArn
+
+  UserEventsTopicArn:
+    Description: ARN of the User Events SNS Topic
+    Value: !Ref UserEventsTopic
+    Export:
+      Name: !Sub ${AWS::StackName}-UserEventsTopicArn
+
+  InventoryEventsTopicArn:
+    Description: ARN of the Inventory Events SNS Topic
+    Value: !Ref InventoryEventsTopic
+    Export:
+      Name: !Sub ${AWS::StackName}-InventoryEventsTopicArn
+
+  OrderProcessingQueueUrl:
+    Description: URL of the Order Processing SQS Queue
+    Value: !Ref OrderProcessingQueue
+    Export:
+      Name: !Sub ${AWS::StackName}-OrderProcessingQueueUrl
+
+  InventoryUpdateQueueUrl:
+    Description: URL of the Inventory Update SQS Queue
+    Value: !Ref InventoryUpdateQueue
+    Export:
+      Name: !Sub ${AWS::StackName}-InventoryUpdateQueueUrl
+
+  NotificationQueueUrl:
+    Description: URL of the Notification SQS Queue
+    Value: !Ref NotificationQueue
+    Export:
+      Name: !Sub ${AWS::StackName}-NotificationQueueUrl
+
+  AnalyticsQueueUrl:
+    Description: URL of the Analytics SQS Queue
+    Value: !Ref AnalyticsQueue
+    Export:
+      Name: !Sub ${AWS::StackName}-AnalyticsQueueUrl
+
+  MessagingServiceRoleArn:
+    Description: ARN of the IAM Role for messaging services
+    Value: !GetAtt MessagingServiceRole.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-MessagingServiceRoleArn

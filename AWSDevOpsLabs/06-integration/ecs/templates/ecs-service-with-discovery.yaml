@@ -1,0 +1,372 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'ECS Service with Cloud Map Service Discovery and ALB Integration'
+
+Parameters:
+  InfrastructureStackName:
+    Type: String
+    Description: 'Name of the infrastructure stack'
+    Default: 'ecs-infrastructure'
+
+  ServiceName:
+    Type: String
+    Default: 'web-service'
+    Description: 'Name of the ECS service'
+
+  ContainerImage:
+    Type: String
+    Default: 'nginx:latest'
+    Description: 'Container image to deploy'
+
+  ContainerPort:
+    Type: Number
+    Default: 80
+    Description: 'Port the container listens on'
+
+  DesiredCount:
+    Type: Number
+    Default: 2
+    Description: 'Desired number of tasks'
+
+  MinCapacity:
+    Type: Number
+    Default: 1
+    Description: 'Minimum number of tasks for auto-scaling'
+
+  MaxCapacity:
+    Type: Number
+    Default: 10
+    Description: 'Maximum number of tasks for auto-scaling'
+
+  TargetCPUUtilization:
+    Type: Number
+    Default: 70
+    Description: 'Target CPU utilization for auto-scaling'
+
+  TargetMemoryUtilization:
+    Type: Number
+    Default: 80
+    Description: 'Target memory utilization for auto-scaling'
+
+Resources:
+  # CloudWatch Log Group
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/ecs/${ServiceName}'
+      RetentionInDays: 7
+
+  # Service Discovery Service
+  ServiceDiscoveryService:
+    Type: AWS::ServiceDiscovery::Service
+    Properties:
+      Name: !Ref ServiceName
+      DnsConfig:
+        DnsRecords:
+          - Type: A
+            TTL: 60
+        NamespaceId:
+          Fn::ImportValue: !Sub '${InfrastructureStackName}-ServiceDiscovery-NamespaceId'
+      HealthCheckCustomConfig:
+        FailureThreshold: 1
+      Description: !Sub 'Service discovery for ${ServiceName}'
+
+  # ALB Target Group
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub '${ServiceName}-tg'
+      Port: !Ref ContainerPort
+      Protocol: HTTP
+      VpcId:
+        Fn::ImportValue: !Sub '${InfrastructureStackName}-VPC-ID'
+      TargetType: ip
+      HealthCheckPath: /
+      HealthCheckProtocol: HTTP
+      HealthCheckIntervalSeconds: 30
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: '30'
+        - Key: stickiness.enabled
+          Value: 'false'
+
+  # ALB Listener Rule
+  ListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroup
+      Conditions:
+        - Field: path-pattern
+          Values:
+            - !Sub '/${ServiceName}*'
+      ListenerArn: !Ref ALBListener
+      Priority: 100
+
+  # ALB Listener (if not exists)
+  ALBListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - Type: fixed-response
+          FixedResponseConfig:
+            StatusCode: 404
+            ContentType: text/plain
+            MessageBody: 'Service not found'
+      LoadBalancerArn:
+        Fn::ImportValue: !Sub '${InfrastructureStackName}-ALB-ARN'
+      Port: 80
+      Protocol: HTTP
+
+  # ECS Task Definition
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Ref ServiceName
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      Cpu: 256
+      Memory: 512
+      ExecutionRoleArn:
+        Fn::ImportValue: !Sub '${InfrastructureStackName}-TaskExecutionRole-ARN'
+      TaskRoleArn:
+        Fn::ImportValue: !Sub '${InfrastructureStackName}-TaskRole-ARN'
+      ContainerDefinitions:
+        - Name: !Ref ServiceName
+          Image: !Ref ContainerImage
+          PortMappings:
+            - ContainerPort: !Ref ContainerPort
+              Protocol: tcp
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: ecs
+          Environment:
+            - Name: SERVICE_NAME
+              Value: !Ref ServiceName
+            - Name: SERVICE_DISCOVERY_NAMESPACE
+              Value:
+                Fn::ImportValue: !Sub '${InfrastructureStackName}-ServiceDiscovery-NamespaceName'
+          HealthCheck:
+            Command:
+              - CMD-SHELL
+              - 'curl -f http://localhost/ || exit 1'
+            Interval: 30
+            Timeout: 5
+            Retries: 3
+            StartPeriod: 60
+
+  # ECS Service
+  ECSService:
+    Type: AWS::ECS::Service
+    DependsOn: ListenerRule
+    Properties:
+      ServiceName: !Ref ServiceName
+      Cluster:
+        Fn::ImportValue: !Sub '${InfrastructureStackName}-ECSCluster-Name'
+      TaskDefinition: !Ref TaskDefinition
+      DesiredCount: !Ref DesiredCount
+      LaunchType: FARGATE
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          SecurityGroups:
+            - Fn::ImportValue: !Sub '${InfrastructureStackName}-ECS-SecurityGroup-ID'
+          Subnets:
+            - Fn::ImportValue: !Sub '${InfrastructureStackName}-PrivateSubnet1-ID'
+            - Fn::ImportValue: !Sub '${InfrastructureStackName}-PrivateSubnet2-ID'
+          AssignPublicIp: DISABLED
+      LoadBalancers:
+        - ContainerName: !Ref ServiceName
+          ContainerPort: !Ref ContainerPort
+          TargetGroupArn: !Ref TargetGroup
+      ServiceRegistries:
+        - RegistryArn: !GetAtt ServiceDiscoveryService.Arn
+      DeploymentConfiguration:
+        MaximumPercent: 200
+        MinimumHealthyPercent: 50
+        DeploymentCircuitBreaker:
+          Enable: true
+          Rollback: true
+      EnableExecuteCommand: true
+      Tags:
+        - Key: Name
+          Value: !Ref ServiceName
+
+  # Auto Scaling Target
+  ServiceScalingTarget:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    Properties:
+      MaxCapacity: !Ref MaxCapacity
+      MinCapacity: !Ref MinCapacity
+      ResourceId: !Sub 'service/${InfrastructureStackName}-cluster/${ServiceName}'
+      RoleARN: !GetAtt ApplicationAutoScalingECSRole.Arn
+      ScalableDimension: ecs:service:DesiredCount
+      ServiceNamespace: ecs
+
+  # Auto Scaling Role
+  ApplicationAutoScalingECSRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: application-autoscaling.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSServiceRolePolicy
+      Policies:
+        - PolicyName: ECSAutoScalingPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ecs:DescribeServices
+                  - ecs:UpdateService
+                  - cloudwatch:DescribeAlarms
+                  - cloudwatch:PutMetricAlarm
+                  - cloudwatch:DeleteAlarms
+                Resource: '*'
+
+  # CPU-based Auto Scaling Policy
+  ServiceScalingPolicyCPU:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: !Sub '${ServiceName}-cpu-scaling-policy'
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref ServiceScalingTarget
+      TargetTrackingScalingPolicyConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ECSServiceAverageCPUUtilization
+        TargetValue: !Ref TargetCPUUtilization
+        ScaleOutCooldown: 300
+        ScaleInCooldown: 300
+
+  # Memory-based Auto Scaling Policy
+  ServiceScalingPolicyMemory:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: !Sub '${ServiceName}-memory-scaling-policy'
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref ServiceScalingTarget
+      TargetTrackingScalingPolicyConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ECSServiceAverageMemoryUtilization
+        TargetValue: !Ref TargetMemoryUtilization
+        ScaleOutCooldown: 300
+        ScaleInCooldown: 300
+
+  # Custom CloudWatch Metrics for Advanced Scaling
+  CustomMetricFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Ref LogGroup
+      FilterPattern: '[timestamp, request_id, "ERROR"]'
+      MetricTransformations:
+        - MetricNamespace: !Sub 'ECS/${ServiceName}'
+          MetricName: ErrorCount
+          MetricValue: '1'
+          DefaultValue: 0
+
+  # Custom Scaling Policy based on Error Rate
+  ServiceScalingPolicyCustom:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: !Sub '${ServiceName}-error-rate-scaling-policy'
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref ServiceScalingTarget
+      TargetTrackingScalingPolicyConfiguration:
+        CustomizedMetricSpecification:
+          MetricName: ErrorCount
+          Namespace: !Sub 'ECS/${ServiceName}'
+          Statistic: Sum
+        TargetValue: 10
+        ScaleOutCooldown: 60
+        ScaleInCooldown: 300
+
+  # CloudWatch Alarms for Monitoring
+  HighCPUAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${ServiceName}-high-cpu'
+      AlarmDescription: 'High CPU utilization for ECS service'
+      MetricName: CPUUtilization
+      Namespace: AWS/ECS
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 80
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: ServiceName
+          Value: !Ref ServiceName
+        - Name: ClusterName
+          Value:
+            Fn::ImportValue: !Sub '${InfrastructureStackName}-ECSCluster-Name'
+
+  HighMemoryAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${ServiceName}-high-memory'
+      AlarmDescription: 'High memory utilization for ECS service'
+      MetricName: MemoryUtilization
+      Namespace: AWS/ECS
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 85
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: ServiceName
+          Value: !Ref ServiceName
+        - Name: ClusterName
+          Value:
+            Fn::ImportValue: !Sub '${InfrastructureStackName}-ECSCluster-Name'
+
+Outputs:
+  ServiceName:
+    Description: 'ECS Service Name'
+    Value: !Ref ECSService
+    Export:
+      Name: !Sub '${AWS::StackName}-Service-Name'
+
+  ServiceArn:
+    Description: 'ECS Service ARN'
+    Value: !Ref ECSService
+    Export:
+      Name: !Sub '${AWS::StackName}-Service-ARN'
+
+  TargetGroupArn:
+    Description: 'ALB Target Group ARN'
+    Value: !Ref TargetGroup
+    Export:
+      Name: !Sub '${AWS::StackName}-TargetGroup-ARN'
+
+  ServiceDiscoveryServiceArn:
+    Description: 'Service Discovery Service ARN'
+    Value: !GetAtt ServiceDiscoveryService.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-ServiceDiscovery-ARN'
+
+  ServiceURL:
+    Description: 'Service URL through ALB'
+    Value: !Sub 
+      - 'http://${ALBDNSName}/${ServiceName}'
+      - ALBDNSName:
+          Fn::ImportValue: !Sub '${InfrastructureStackName}-ALB-DNS'
+    Export:
+      Name: !Sub '${AWS::StackName}-Service-URL'
+
+  LogGroupName:
+    Description: 'CloudWatch Log Group Name'
+    Value: !Ref LogGroup
+    Export:
+      Name: !Sub '${AWS::StackName}-LogGroup-Name'

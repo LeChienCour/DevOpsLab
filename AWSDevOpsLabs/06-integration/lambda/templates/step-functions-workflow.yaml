@@ -1,0 +1,383 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Step Functions workflow orchestrating Lambda functions for serverless integration patterns'
+
+Parameters:
+  WorkflowName:
+    Type: String
+    Default: 'serverless-integration-workflow'
+    Description: 'Name of the Step Functions state machine'
+
+Resources:
+  # Lambda Functions for Step Functions workflow
+  DataValidationFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${WorkflowName}-data-validation'
+      Runtime: python3.9
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 30
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          from datetime import datetime
+          
+          def lambda_handler(event, context):
+              print(f"Received event: {json.dumps(event)}")
+              
+              # Validate input data
+              required_fields = ['id', 'name', 'email']
+              data = event.get('data', {})
+              
+              validation_errors = []
+              for field in required_fields:
+                  if field not in data or not data[field]:
+                      validation_errors.append(f"Missing required field: {field}")
+              
+              # Email validation
+              if 'email' in data and '@' not in data['email']:
+                  validation_errors.append("Invalid email format")
+              
+              result = {
+                  'isValid': len(validation_errors) == 0,
+                  'errors': validation_errors,
+                  'data': data,
+                  'validatedAt': datetime.utcnow().isoformat()
+              }
+              
+              if not result['isValid']:
+                  raise Exception(f"Validation failed: {', '.join(validation_errors)}")
+              
+              return result
+
+  DataProcessingFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${WorkflowName}-data-processing'
+      Runtime: python3.9
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 60
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import time
+          from datetime import datetime
+          
+          dynamodb = boto3.resource('dynamodb')
+          
+          def lambda_handler(event, context):
+              print(f"Processing event: {json.dumps(event)}")
+              
+              data = event['data']
+              
+              # Simulate processing time
+              time.sleep(2)
+              
+              # Process the data
+              processed_data = {
+                  'id': data['id'],
+                  'name': data['name'].upper(),
+                  'email': data['email'].lower(),
+                  'processedAt': datetime.utcnow().isoformat(),
+                  'status': 'processed'
+              }
+              
+              # Store in DynamoDB
+              table = dynamodb.Table('serverless-integration-data')
+              table.put_item(Item=processed_data)
+              
+              return {
+                  'processedData': processed_data,
+                  'message': 'Data processed successfully'
+              }
+
+  NotificationFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${WorkflowName}-notification'
+      Runtime: python3.9
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 30
+      Environment:
+        Variables:
+          SNS_TOPIC_ARN: !Ref NotificationTopic
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+          from datetime import datetime
+          
+          sns = boto3.client('sns')
+          
+          def lambda_handler(event, context):
+              print(f"Sending notification for: {json.dumps(event)}")
+              
+              processed_data = event['processedData']
+              
+              message = {
+                  'subject': 'Data Processing Complete',
+                  'body': f"Successfully processed data for {processed_data['name']} ({processed_data['email']})",
+                  'timestamp': datetime.utcnow().isoformat(),
+                  'data': processed_data
+              }
+              
+              # Send SNS notification
+              sns.publish(
+                  TopicArn=os.environ['SNS_TOPIC_ARN'],
+                  Message=json.dumps(message, indent=2),
+                  Subject=message['subject']
+              )
+              
+              return {
+                  'notificationSent': True,
+                  'message': 'Notification sent successfully'
+              }
+
+  ErrorHandlerFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${WorkflowName}-error-handler'
+      Runtime: python3.9
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 30
+      Environment:
+        Variables:
+          SNS_TOPIC_ARN: !Ref NotificationTopic
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+          from datetime import datetime
+          
+          sns = boto3.client('sns')
+          
+          def lambda_handler(event, context):
+              print(f"Handling error: {json.dumps(event)}")
+              
+              error_info = {
+                  'errorType': event.get('Error', 'Unknown'),
+                  'errorMessage': event.get('Cause', 'No details available'),
+                  'timestamp': datetime.utcnow().isoformat(),
+                  'originalInput': event.get('originalInput', {})
+              }
+              
+              # Send error notification
+              sns.publish(
+                  TopicArn=os.environ['SNS_TOPIC_ARN'],
+                  Message=json.dumps(error_info, indent=2),
+                  Subject='Workflow Error Notification'
+              )
+              
+              return {
+                  'errorHandled': True,
+                  'errorInfo': error_info
+              }
+
+  # DynamoDB Table for storing processed data
+  DataTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: 'serverless-integration-data'
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH
+      BillingMode: PAY_PER_REQUEST
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+
+  # SNS Topic for notifications
+  NotificationTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub '${WorkflowName}-notifications'
+      DisplayName: 'Serverless Integration Notifications'
+
+  # Step Functions State Machine
+  StateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: !Ref WorkflowName
+      RoleArn: !GetAtt StepFunctionsExecutionRole.Arn
+      DefinitionString: !Sub |
+        {
+          "Comment": "Serverless integration workflow with error handling",
+          "StartAt": "ValidateData",
+          "States": {
+            "ValidateData": {
+              "Type": "Task",
+              "Resource": "${DataValidationFunction.Arn}",
+              "Retry": [
+                {
+                  "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException"],
+                  "IntervalSeconds": 2,
+                  "MaxAttempts": 3,
+                  "BackoffRate": 2.0
+                }
+              ],
+              "Catch": [
+                {
+                  "ErrorEquals": ["States.ALL"],
+                  "Next": "HandleError",
+                  "ResultPath": "$.error"
+                }
+              ],
+              "Next": "ProcessData"
+            },
+            "ProcessData": {
+              "Type": "Task",
+              "Resource": "${DataProcessingFunction.Arn}",
+              "Retry": [
+                {
+                  "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException"],
+                  "IntervalSeconds": 2,
+                  "MaxAttempts": 3,
+                  "BackoffRate": 2.0
+                }
+              ],
+              "Catch": [
+                {
+                  "ErrorEquals": ["States.ALL"],
+                  "Next": "HandleError",
+                  "ResultPath": "$.error"
+                }
+              ],
+              "Next": "SendNotification"
+            },
+            "SendNotification": {
+              "Type": "Task",
+              "Resource": "${NotificationFunction.Arn}",
+              "Retry": [
+                {
+                  "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException"],
+                  "IntervalSeconds": 2,
+                  "MaxAttempts": 3,
+                  "BackoffRate": 2.0
+                }
+              ],
+              "End": true
+            },
+            "HandleError": {
+              "Type": "Task",
+              "Resource": "${ErrorHandlerFunction.Arn}",
+              "End": true
+            }
+          }
+        }
+
+  # IAM Roles
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: DynamoDBAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:GetItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                Resource: !GetAtt DataTable.Arn
+        - PolicyName: SNSAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: !Ref NotificationTopic
+
+  StepFunctionsExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: states.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: LambdaInvokePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource:
+                  - !GetAtt DataValidationFunction.Arn
+                  - !GetAtt DataProcessingFunction.Arn
+                  - !GetAtt NotificationFunction.Arn
+                  - !GetAtt ErrorHandlerFunction.Arn
+
+  # CloudWatch Log Group for Step Functions
+  StateMachineLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/stepfunctions/${WorkflowName}'
+      RetentionInDays: 7
+
+Outputs:
+  StateMachineArn:
+    Description: 'Step Functions State Machine ARN'
+    Value: !Ref StateMachine
+    Export:
+      Name: !Sub '${AWS::StackName}-StateMachine-ARN'
+
+  StateMachineName:
+    Description: 'Step Functions State Machine Name'
+    Value: !Ref StateMachine
+    Export:
+      Name: !Sub '${AWS::StackName}-StateMachine-Name'
+
+  DataTableName:
+    Description: 'DynamoDB Table Name'
+    Value: !Ref DataTable
+    Export:
+      Name: !Sub '${AWS::StackName}-DataTable-Name'
+
+  NotificationTopicArn:
+    Description: 'SNS Topic ARN for notifications'
+    Value: !Ref NotificationTopic
+    Export:
+      Name: !Sub '${AWS::StackName}-NotificationTopic-ARN'
+
+  ValidationFunctionArn:
+    Description: 'Data Validation Lambda Function ARN'
+    Value: !GetAtt DataValidationFunction.Arn
+
+  ProcessingFunctionArn:
+    Description: 'Data Processing Lambda Function ARN'
+    Value: !GetAtt DataProcessingFunction.Arn
+
+  NotificationFunctionArn:
+    Description: 'Notification Lambda Function ARN'
+    Value: !GetAtt NotificationFunction.Arn
+
+  ErrorHandlerFunctionArn:
+    Description: 'Error Handler Lambda Function ARN'
+    Value: !GetAtt ErrorHandlerFunction.Arn

@@ -1,0 +1,787 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'API Gateway integration patterns with Lambda authorizers and various authentication methods'
+
+Parameters:
+  ApiName:
+    Type: String
+    Default: 'serverless-integration-api'
+    Description: 'Name of the API Gateway'
+
+  StageName:
+    Type: String
+    Default: 'dev'
+    Description: 'API Gateway stage name'
+
+Resources:
+  # API Gateway REST API
+  RestApi:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: !Ref ApiName
+      Description: 'Serverless integration API with Lambda authorizers'
+      EndpointConfiguration:
+        Types:
+          - REGIONAL
+      Policy:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: '*'
+            Action: execute-api:Invoke
+            Resource: '*'
+
+  # Lambda Authorizer Functions
+  TokenAuthorizerFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: 'token-authorizer'
+      Runtime: python3.9
+      Handler: index.lambda_handler
+      Role: !GetAtt AuthorizerExecutionRole.Arn
+      Timeout: 30
+      Code:
+        ZipFile: |
+          import json
+          import re
+          
+          def lambda_handler(event, context):
+              print(f"Token authorizer event: {json.dumps(event)}")
+              
+              token = event['authorizationToken']
+              method_arn = event['methodArn']
+              
+              # Simple token validation (in production, validate against your auth service)
+              if token == 'Bearer valid-token-123':
+                  effect = 'Allow'
+                  principal_id = 'user123'
+              elif token == 'Bearer admin-token-456':
+                  effect = 'Allow'
+                  principal_id = 'admin456'
+              else:
+                  effect = 'Deny'
+                  principal_id = 'unauthorized'
+              
+              # Extract API Gateway ARN components
+              arn_parts = method_arn.split(':')
+              api_gateway_arn = ':'.join(arn_parts[:5])
+              
+              # Build policy
+              policy = {
+                  'principalId': principal_id,
+                  'policyDocument': {
+                      'Version': '2012-10-17',
+                      'Statement': [
+                          {
+                              'Action': 'execute-api:Invoke',
+                              'Effect': effect,
+                              'Resource': f"{api_gateway_arn}/*/*"
+                          }
+                      ]
+                  },
+                  'context': {
+                      'userId': principal_id,
+                      'userRole': 'admin' if 'admin' in token else 'user'
+                  }
+              }
+              
+              return policy
+
+  RequestAuthorizerFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: 'request-authorizer'
+      Runtime: python3.9
+      Handler: index.lambda_handler
+      Role: !GetAtt AuthorizerExecutionRole.Arn
+      Timeout: 30
+      Code:
+        ZipFile: |
+          import json
+          import base64
+          import hmac
+          import hashlib
+          from datetime import datetime, timedelta
+          
+          def lambda_handler(event, context):
+              print(f"Request authorizer event: {json.dumps(event)}")
+              
+              headers = event.get('headers', {})
+              query_params = event.get('queryStringParameters') or {}
+              method_arn = event['methodArn']
+              
+              # Check for API key in headers
+              api_key = headers.get('x-api-key') or headers.get('X-API-Key')
+              
+              # Check for signature-based auth
+              signature = headers.get('x-signature')
+              timestamp = headers.get('x-timestamp')
+              
+              effect = 'Deny'
+              principal_id = 'unauthorized'
+              
+              # API Key validation
+              if api_key == 'valid-api-key-789':
+                  effect = 'Allow'
+                  principal_id = 'api-user'
+              
+              # Signature validation (simplified HMAC example)
+              elif signature and timestamp:
+                  try:
+                      # Check timestamp (within 5 minutes)
+                      request_time = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+                      if abs((datetime.utcnow() - request_time.replace(tzinfo=None)).total_seconds()) < 300:
+                          
+                          # Validate signature
+                          secret_key = 'your-secret-key'
+                          expected_signature = hmac.new(
+                              secret_key.encode(),
+                              f"{event['httpMethod']}{event['path']}{timestamp}".encode(),
+                              hashlib.sha256
+                          ).hexdigest()
+                          
+                          if hmac.compare_digest(signature, expected_signature):
+                              effect = 'Allow'
+                              principal_id = 'signed-user'
+                  except Exception as e:
+                      print(f"Signature validation error: {e}")
+              
+              # Extract API Gateway ARN components
+              arn_parts = method_arn.split(':')
+              api_gateway_arn = ':'.join(arn_parts[:5])
+              
+              # Build policy
+              policy = {
+                  'principalId': principal_id,
+                  'policyDocument': {
+                      'Version': '2012-10-17',
+                      'Statement': [
+                          {
+                              'Action': 'execute-api:Invoke',
+                              'Effect': effect,
+                              'Resource': f"{api_gateway_arn}/*/*"
+                          }
+                      ]
+                  },
+                  'context': {
+                      'userId': principal_id,
+                      'authMethod': 'api-key' if api_key else 'signature' if signature else 'none'
+                  }
+              }
+              
+              return policy
+
+  # Business Logic Lambda Functions
+  PublicFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: 'public-endpoint'
+      Runtime: python3.9
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 30
+      Code:
+        ZipFile: |
+          import json
+          from datetime import datetime
+          
+          def lambda_handler(event, context):
+              print(f"Public endpoint event: {json.dumps(event)}")
+              
+              return {
+                  'statusCode': 200,
+                  'headers': {
+                      'Content-Type': 'application/json',
+                      'Access-Control-Allow-Origin': '*'
+                  },
+                  'body': json.dumps({
+                      'message': 'This is a public endpoint',
+                      'timestamp': datetime.utcnow().isoformat(),
+                      'requestId': context.aws_request_id
+                  })
+              }
+
+  ProtectedFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: 'protected-endpoint'
+      Runtime: python3.9
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 30
+      Code:
+        ZipFile: |
+          import json
+          from datetime import datetime
+          
+          def lambda_handler(event, context):
+              print(f"Protected endpoint event: {json.dumps(event)}")
+              
+              # Extract user context from authorizer
+              request_context = event.get('requestContext', {})
+              authorizer = request_context.get('authorizer', {})
+              
+              user_id = authorizer.get('userId', 'unknown')
+              user_role = authorizer.get('userRole', 'user')
+              
+              return {
+                  'statusCode': 200,
+                  'headers': {
+                      'Content-Type': 'application/json',
+                      'Access-Control-Allow-Origin': '*'
+                  },
+                  'body': json.dumps({
+                      'message': 'This is a protected endpoint',
+                      'userId': user_id,
+                      'userRole': user_role,
+                      'timestamp': datetime.utcnow().isoformat(),
+                      'requestId': context.aws_request_id
+                  })
+              }
+
+  AdminFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: 'admin-endpoint'
+      Runtime: python3.9
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 30
+      Code:
+        ZipFile: |
+          import json
+          from datetime import datetime
+          
+          def lambda_handler(event, context):
+              print(f"Admin endpoint event: {json.dumps(event)}")
+              
+              # Extract user context from authorizer
+              request_context = event.get('requestContext', {})
+              authorizer = request_context.get('authorizer', {})
+              
+              user_id = authorizer.get('userId', 'unknown')
+              user_role = authorizer.get('userRole', 'user')
+              
+              # Check if user has admin role
+              if user_role != 'admin':
+                  return {
+                      'statusCode': 403,
+                      'headers': {
+                          'Content-Type': 'application/json',
+                          'Access-Control-Allow-Origin': '*'
+                      },
+                      'body': json.dumps({
+                          'error': 'Forbidden',
+                          'message': 'Admin access required'
+                      })
+                  }
+              
+              return {
+                  'statusCode': 200,
+                  'headers': {
+                      'Content-Type': 'application/json',
+                      'Access-Control-Allow-Origin': '*'
+                  },
+                  'body': json.dumps({
+                      'message': 'This is an admin-only endpoint',
+                      'userId': user_id,
+                      'userRole': user_role,
+                      'timestamp': datetime.utcnow().isoformat(),
+                      'requestId': context.aws_request_id,
+                      'adminData': {
+                          'systemStatus': 'operational',
+                          'activeUsers': 42,
+                          'systemLoad': '23%'
+                      }
+                  })
+              }
+
+  DataProcessorFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: 'data-processor-endpoint'
+      Runtime: python3.9
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 30
+      Environment:
+        Variables:
+          DYNAMODB_TABLE: !Ref DataTable
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+          from datetime import datetime
+          
+          dynamodb = boto3.resource('dynamodb')
+          
+          def lambda_handler(event, context):
+              print(f"Data processor endpoint event: {json.dumps(event)}")
+              
+              http_method = event['httpMethod']
+              path_parameters = event.get('pathParameters') or {}
+              query_parameters = event.get('queryStringParameters') or {}
+              body = event.get('body')
+              
+              # Extract user context from authorizer
+              request_context = event.get('requestContext', {})
+              authorizer = request_context.get('authorizer', {})
+              user_id = authorizer.get('userId', 'unknown')
+              
+              table = dynamodb.Table(os.environ['DYNAMODB_TABLE'])
+              
+              try:
+                  if http_method == 'GET':
+                      # Get data
+                      if 'id' in path_parameters:
+                          # Get specific item
+                          response = table.get_item(Key={'id': path_parameters['id']})
+                          item = response.get('Item')
+                          if not item:
+                              return {
+                                  'statusCode': 404,
+                                  'headers': {'Content-Type': 'application/json'},
+                                  'body': json.dumps({'error': 'Item not found'})
+                              }
+                          return {
+                              'statusCode': 200,
+                              'headers': {'Content-Type': 'application/json'},
+                              'body': json.dumps(item, default=str)
+                          }
+                      else:
+                          # List items
+                          response = table.scan(Limit=10)
+                          return {
+                              'statusCode': 200,
+                              'headers': {'Content-Type': 'application/json'},
+                              'body': json.dumps({
+                                  'items': response.get('Items', []),
+                                  'count': response.get('Count', 0)
+                              }, default=str)
+                          }
+                  
+                  elif http_method == 'POST':
+                      # Create new item
+                      if not body:
+                          return {
+                              'statusCode': 400,
+                              'headers': {'Content-Type': 'application/json'},
+                              'body': json.dumps({'error': 'Request body required'})
+                          }
+                      
+                      data = json.loads(body)
+                      item = {
+                          'id': data.get('id', f"item-{int(datetime.utcnow().timestamp())}"),
+                          'data': data,
+                          'createdBy': user_id,
+                          'createdAt': datetime.utcnow().isoformat()
+                      }
+                      
+                      table.put_item(Item=item)
+                      
+                      return {
+                          'statusCode': 201,
+                          'headers': {'Content-Type': 'application/json'},
+                          'body': json.dumps(item, default=str)
+                      }
+                  
+                  elif http_method == 'PUT':
+                      # Update item
+                      if 'id' not in path_parameters:
+                          return {
+                              'statusCode': 400,
+                              'headers': {'Content-Type': 'application/json'},
+                              'body': json.dumps({'error': 'ID parameter required'})
+                          }
+                      
+                      if not body:
+                          return {
+                              'statusCode': 400,
+                              'headers': {'Content-Type': 'application/json'},
+                              'body': json.dumps({'error': 'Request body required'})
+                          }
+                      
+                      data = json.loads(body)
+                      item_id = path_parameters['id']
+                      
+                      # Update item
+                      table.update_item(
+                          Key={'id': item_id},
+                          UpdateExpression='SET #data = :data, updatedBy = :user, updatedAt = :timestamp',
+                          ExpressionAttributeNames={'#data': 'data'},
+                          ExpressionAttributeValues={
+                              ':data': data,
+                              ':user': user_id,
+                              ':timestamp': datetime.utcnow().isoformat()
+                          }
+                      )
+                      
+                      return {
+                          'statusCode': 200,
+                          'headers': {'Content-Type': 'application/json'},
+                          'body': json.dumps({'message': 'Item updated successfully', 'id': item_id})
+                      }
+                  
+                  elif http_method == 'DELETE':
+                      # Delete item
+                      if 'id' not in path_parameters:
+                          return {
+                              'statusCode': 400,
+                              'headers': {'Content-Type': 'application/json'},
+                              'body': json.dumps({'error': 'ID parameter required'})
+                          }
+                      
+                      item_id = path_parameters['id']
+                      table.delete_item(Key={'id': item_id})
+                      
+                      return {
+                          'statusCode': 200,
+                          'headers': {'Content-Type': 'application/json'},
+                          'body': json.dumps({'message': 'Item deleted successfully', 'id': item_id})
+                      }
+                  
+                  else:
+                      return {
+                          'statusCode': 405,
+                          'headers': {'Content-Type': 'application/json'},
+                          'body': json.dumps({'error': 'Method not allowed'})
+                      }
+              
+              except Exception as e:
+                  print(f"Error: {str(e)}")
+                  return {
+                      'statusCode': 500,
+                      'headers': {'Content-Type': 'application/json'},
+                      'body': json.dumps({'error': 'Internal server error'})
+                  }
+
+  # DynamoDB Table for data storage
+  DataTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: 'api-gateway-data'
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH
+      BillingMode: PAY_PER_REQUEST
+
+  # API Gateway Authorizers
+  TokenAuthorizer:
+    Type: AWS::ApiGateway::Authorizer
+    Properties:
+      Name: 'TokenAuthorizer'
+      Type: TOKEN
+      RestApiId: !Ref RestApi
+      AuthorizerUri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${TokenAuthorizerFunction.Arn}/invocations'
+      AuthorizerCredentials: !GetAtt ApiGatewayAuthorizerRole.Arn
+      IdentitySource: 'method.request.header.Authorization'
+      AuthorizerResultTtlInSeconds: 300
+
+  RequestAuthorizer:
+    Type: AWS::ApiGateway::Authorizer
+    Properties:
+      Name: 'RequestAuthorizer'
+      Type: REQUEST
+      RestApiId: !Ref RestApi
+      AuthorizerUri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${RequestAuthorizerFunction.Arn}/invocations'
+      AuthorizerCredentials: !GetAtt ApiGatewayAuthorizerRole.Arn
+      IdentitySource: 'method.request.header.x-api-key,method.request.header.x-signature'
+      AuthorizerResultTtlInSeconds: 300
+
+  # API Gateway Resources and Methods
+  PublicResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref RestApi
+      ParentId: !GetAtt RestApi.RootResourceId
+      PathPart: 'public'
+
+  PublicMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref RestApi
+      ResourceId: !Ref PublicResource
+      HttpMethod: GET
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${PublicFunction.Arn}/invocations'
+
+  ProtectedResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref RestApi
+      ParentId: !GetAtt RestApi.RootResourceId
+      PathPart: 'protected'
+
+  ProtectedMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref RestApi
+      ResourceId: !Ref ProtectedResource
+      HttpMethod: GET
+      AuthorizationType: CUSTOM
+      AuthorizerId: !Ref TokenAuthorizer
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ProtectedFunction.Arn}/invocations'
+
+  AdminResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref RestApi
+      ParentId: !GetAtt RestApi.RootResourceId
+      PathPart: 'admin'
+
+  AdminMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref RestApi
+      ResourceId: !Ref AdminResource
+      HttpMethod: GET
+      AuthorizationType: CUSTOM
+      AuthorizerId: !Ref TokenAuthorizer
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${AdminFunction.Arn}/invocations'
+
+  DataResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref RestApi
+      ParentId: !GetAtt RestApi.RootResourceId
+      PathPart: 'data'
+
+  DataIdResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref RestApi
+      ParentId: !Ref DataResource
+      PathPart: '{id}'
+
+  # Data resource methods with request authorizer
+  DataGetMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref RestApi
+      ResourceId: !Ref DataResource
+      HttpMethod: GET
+      AuthorizationType: CUSTOM
+      AuthorizerId: !Ref RequestAuthorizer
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${DataProcessorFunction.Arn}/invocations'
+
+  DataPostMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref RestApi
+      ResourceId: !Ref DataResource
+      HttpMethod: POST
+      AuthorizationType: CUSTOM
+      AuthorizerId: !Ref RequestAuthorizer
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${DataProcessorFunction.Arn}/invocations'
+
+  DataGetByIdMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref RestApi
+      ResourceId: !Ref DataIdResource
+      HttpMethod: GET
+      AuthorizationType: CUSTOM
+      AuthorizerId: !Ref RequestAuthorizer
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${DataProcessorFunction.Arn}/invocations'
+
+  DataPutMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref RestApi
+      ResourceId: !Ref DataIdResource
+      HttpMethod: PUT
+      AuthorizationType: CUSTOM
+      AuthorizerId: !Ref RequestAuthorizer
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${DataProcessorFunction.Arn}/invocations'
+
+  DataDeleteMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref RestApi
+      ResourceId: !Ref DataIdResource
+      HttpMethod: DELETE
+      AuthorizationType: CUSTOM
+      AuthorizerId: !Ref RequestAuthorizer
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${DataProcessorFunction.Arn}/invocations'
+
+  # API Gateway Deployment
+  ApiDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn:
+      - PublicMethod
+      - ProtectedMethod
+      - AdminMethod
+      - DataGetMethod
+      - DataPostMethod
+      - DataGetByIdMethod
+      - DataPutMethod
+      - DataDeleteMethod
+    Properties:
+      RestApiId: !Ref RestApi
+      StageName: !Ref StageName
+
+  # Lambda Permissions for API Gateway
+  PublicFunctionPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref PublicFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${RestApi}/*/*'
+
+  ProtectedFunctionPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref ProtectedFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${RestApi}/*/*'
+
+  AdminFunctionPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref AdminFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${RestApi}/*/*'
+
+  DataProcessorFunctionPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref DataProcessorFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${RestApi}/*/*'
+
+  # IAM Roles
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: DynamoDBAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:GetItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                Resource: !GetAtt DataTable.Arn
+
+  AuthorizerExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+  ApiGatewayAuthorizerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: apigateway.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: LambdaInvokePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource:
+                  - !GetAtt TokenAuthorizerFunction.Arn
+                  - !GetAtt RequestAuthorizerFunction.Arn
+
+Outputs:
+  ApiGatewayUrl:
+    Description: 'API Gateway URL'
+    Value: !Sub 'https://${RestApi}.execute-api.${AWS::Region}.amazonaws.com/${StageName}'
+    Export:
+      Name: !Sub '${AWS::StackName}-ApiGateway-URL'
+
+  RestApiId:
+    Description: 'REST API ID'
+    Value: !Ref RestApi
+    Export:
+      Name: !Sub '${AWS::StackName}-RestApi-ID'
+
+  DataTableName:
+    Description: 'DynamoDB Data Table Name'
+    Value: !Ref DataTable
+    Export:
+      Name: !Sub '${AWS::StackName}-DataTable-Name'
+
+  TokenAuthorizerArn:
+    Description: 'Token Authorizer Lambda Function ARN'
+    Value: !GetAtt TokenAuthorizerFunction.Arn
+
+  RequestAuthorizerArn:
+    Description: 'Request Authorizer Lambda Function ARN'
+    Value: !GetAtt RequestAuthorizerFunction.Arn
+
+  PublicEndpoint:
+    Description: 'Public endpoint URL'
+    Value: !Sub 'https://${RestApi}.execute-api.${AWS::Region}.amazonaws.com/${StageName}/public'
+
+  ProtectedEndpoint:
+    Description: 'Protected endpoint URL (requires Bearer token)'
+    Value: !Sub 'https://${RestApi}.execute-api.${AWS::Region}.amazonaws.com/${StageName}/protected'
+
+  AdminEndpoint:
+    Description: 'Admin endpoint URL (requires admin Bearer token)'
+    Value: !Sub 'https://${RestApi}.execute-api.${AWS::Region}.amazonaws.com/${StageName}/admin'
+
+  DataEndpoint:
+    Description: 'Data endpoint URL (requires API key or signature)'
+    Value: !Sub 'https://${RestApi}.execute-api.${AWS::Region}.amazonaws.com/${StageName}/data'
