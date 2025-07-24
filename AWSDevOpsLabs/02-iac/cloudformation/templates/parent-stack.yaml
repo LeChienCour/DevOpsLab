@@ -1,0 +1,166 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Advanced CloudFormation Lab - Parent Stack with Nested Stacks'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+    Description: Environment name for resource tagging
+  
+  VpcCidr:
+    Type: String
+    Default: '10.0.0.0/16'
+    Description: CIDR block for VPC
+  
+  KeyPairName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: EC2 Key Pair for instances
+
+Resources:
+  # Nested Stack for Network Infrastructure
+  NetworkStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub 'https://${TemplatesBucket}.s3.${AWS::Region}.amazonaws.com/network-stack.yaml'
+      Parameters:
+        Environment: !Ref Environment
+        VpcCidr: !Ref VpcCidr
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: StackType
+          Value: Network
+
+  # Nested Stack for Security Groups
+  SecurityStack:
+    Type: AWS::CloudFormation::Stack
+    DependsOn: NetworkStack
+    Properties:
+      TemplateURL: !Sub 'https://${TemplatesBucket}.s3.${AWS::Region}.amazonaws.com/security-stack.yaml'
+      Parameters:
+        Environment: !Ref Environment
+        VpcId: !GetAtt NetworkStack.Outputs.VpcId
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: StackType
+          Value: Security
+
+  # Nested Stack for Application Infrastructure
+  ApplicationStack:
+    Type: AWS::CloudFormation::Stack
+    DependsOn: [NetworkStack, SecurityStack]
+    Properties:
+      TemplateURL: !Sub 'https://${TemplatesBucket}.s3.${AWS::Region}.amazonaws.com/application-stack.yaml'
+      Parameters:
+        Environment: !Ref Environment
+        VpcId: !GetAtt NetworkStack.Outputs.VpcId
+        PublicSubnetId: !GetAtt NetworkStack.Outputs.PublicSubnetId
+        PrivateSubnetId: !GetAtt NetworkStack.Outputs.PrivateSubnetId
+        WebSecurityGroupId: !GetAtt SecurityStack.Outputs.WebSecurityGroupId
+        AppSecurityGroupId: !GetAtt SecurityStack.Outputs.AppSecurityGroupId
+        KeyPairName: !Ref KeyPairName
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: StackType
+          Value: Application
+
+  # Custom Resource for generating random password
+  RandomPasswordGenerator:
+    Type: AWS::CloudFormation::CustomResource
+    Properties:
+      ServiceToken: !GetAtt PasswordGeneratorFunction.Arn
+      Length: 16
+      IncludeSpecialChars: true
+
+  # Lambda function for custom resource
+  PasswordGeneratorFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-password-generator'
+      Runtime: python3.9
+      Handler: index.lambda_handler
+      Role: !GetAtt PasswordGeneratorRole.Arn
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import cfnresponse
+          import secrets
+          import string
+          
+          def lambda_handler(event, context):
+              try:
+                  if event['RequestType'] == 'Delete':
+                      cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+                      return
+                  
+                  length = int(event['ResourceProperties'].get('Length', 12))
+                  include_special = event['ResourceProperties'].get('IncludeSpecialChars', 'false').lower() == 'true'
+                  
+                  chars = string.ascii_letters + string.digits
+                  if include_special:
+                      chars += '!@#$%^&*'
+                  
+                  password = ''.join(secrets.choice(chars) for _ in range(length))
+                  
+                  response_data = {
+                      'Password': password,
+                      'Length': length
+                  }
+                  
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, response_data)
+              except Exception as e:
+                  print(f"Error: {str(e)}")
+                  cfnresponse.send(event, context, cfnresponse.FAILED, {})
+
+  PasswordGeneratorRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+  # S3 Bucket for storing nested stack templates
+  TemplatesBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${AWS::StackName}-templates-${AWS::AccountId}-${AWS::Region}'
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+Outputs:
+  ParentStackId:
+    Description: Parent Stack ID
+    Value: !Ref AWS::StackId
+    Export:
+      Name: !Sub '${AWS::StackName}-ParentStackId'
+
+  VpcId:
+    Description: VPC ID from nested stack
+    Value: !GetAtt NetworkStack.Outputs.VpcId
+    Export:
+      Name: !Sub '${AWS::StackName}-VpcId'
+
+  GeneratedPassword:
+    Description: Generated password from custom resource
+    Value: !GetAtt RandomPasswordGenerator.Password
+
+  TemplatesBucket:
+    Description: S3 bucket for nested stack templates
+    Value: !Ref TemplatesBucket
+    Export:
+      Name: !Sub '${AWS::StackName}-TemplatesBucket'

@@ -242,7 +242,7 @@ Resources:
       ApplicationName: !Ref CodeDeployApplication
       DeploymentGroupName: !Sub '${ProjectName}-deployment-group'
       ServiceRoleArn: !GetAtt CodeDeployServiceRole.Arn
-      DeploymentConfigName: CodeDeployDefault.EC2AllAtOne
+      DeploymentConfigName: CodeDeployDefault.OneAtATime
       Ec2TagFilters:
         - Type: KEY_AND_VALUE
           Key: Project
