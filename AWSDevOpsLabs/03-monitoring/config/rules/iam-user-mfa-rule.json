@@ -1,0 +1,24 @@
+{
+  "ConfigRuleName": "iam-user-mfa-enabled",
+  "Description": "Checks if IAM users have MFA enabled",
+  "Source": {
+    "Owner": "CUSTOM_LAMBDA",
+    "SourceIdentifier": "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:IAMUserMFAConfigRule",
+    "SourceDetails": [
+      {
+        "EventSource": "aws.config",
+        "MessageType": "ConfigurationItemChangeNotification"
+      },
+      {
+        "EventSource": "aws.config",
+        "MessageType": "OversizedConfigurationItemChangeNotification"
+      }
+    ]
+  },
+  "Scope": {
+    "ComplianceResourceTypes": [
+      "AWS::IAM::User"
+    ]
+  },
+  "MaximumExecutionFrequency": "TwentyFour_Hours"
+}

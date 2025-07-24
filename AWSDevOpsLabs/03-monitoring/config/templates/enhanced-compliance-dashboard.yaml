@@ -1,0 +1,694 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Enhanced AWS Config Compliance Dashboard with Trend Analysis'
+
+Parameters:
+  ConfigBucketName:
+    Type: String
+    Description: Name of the S3 bucket where AWS Config stores configuration history
+
+Resources:
+  ComplianceMetricsLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: ConfigComplianceMetricsAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - config:DescribeComplianceByConfigRule
+                  - config:DescribeComplianceByResource
+                  - config:GetComplianceDetailsByConfigRule
+                  - config:GetComplianceDetailsByResource
+                  - config:ListDiscoveredResources
+                  - config:GetComplianceSummaryByConfigRule
+                  - config:GetComplianceSummaryByResourceType
+                  - config:GetResourceConfigHistory
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - cloudwatch:PutMetricData
+                  - cloudwatch:GetMetricStatistics
+                  - cloudwatch:ListMetrics
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:ListBucket
+                  - s3:PutObject
+                Resource:
+                  - !Sub arn:aws:s3:::${ConfigBucketName}
+                  - !Sub arn:aws:s3:::${ConfigBucketName}/*
+
+  ComplianceMetricsLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.handler
+      Role: !GetAtt ComplianceMetricsLambdaRole.Arn
+      Runtime: python3.9
+      Timeout: 60
+      Code:
+        ZipFile: |
+          import boto3
+          import os
+          import datetime
+          import json
+          import time
+          
+          def handler(event, context):
+              """
+              Lambda function to collect AWS Config compliance metrics and publish to CloudWatch
+              """
+              config = boto3.client('config')
+              cloudwatch = boto3.client('cloudwatch')
+              s3 = boto3.client('s3')
+              
+              # Get all Config rules
+              rules_response = config.describe_config_rules()
+              rules = rules_response['ConfigRules']
+              
+              # Get compliance status for each rule
+              compliance_metrics = {
+                  'COMPLIANT': 0,
+                  'NON_COMPLIANT': 0,
+                  'NOT_APPLICABLE': 0
+              }
+              
+              rule_metrics = {}
+              resource_type_metrics = {}
+              
+              for rule in rules:
+                  rule_name = rule['ConfigRuleName']
+                  rule_metrics[rule_name] = {
+                      'COMPLIANT': 0,
+                      'NON_COMPLIANT': 0,
+                      'NOT_APPLICABLE': 0
+                  }
+                  
+                  try:
+                      compliance = config.describe_compliance_by_config_rule(
+                          ConfigRuleNames=[rule_name]
+                      )
+                      
+                      for result in compliance['ComplianceByConfigRules']:
+                          compliance_type = result.get('Compliance', {}).get('ComplianceType', 'NOT_APPLICABLE')
+                          compliance_count = result.get('Compliance', {}).get('ComplianceContributorCount', {})
+                          
+                          compliant_count = compliance_count.get('CappedCount', 0) if compliance_count.get('ComplianceType') == 'COMPLIANT' else 0
+                          non_compliant_count = compliance_count.get('CappedCount', 0) if compliance_count.get('ComplianceType') == 'NON_COMPLIANT' else 0
+                          
+                          rule_metrics[rule_name]['COMPLIANT'] += compliant_count
+                          rule_metrics[rule_name]['NON_COMPLIANT'] += non_compliant_count
+                          
+                          if compliance_type == 'COMPLIANT':
+                              compliance_metrics['COMPLIANT'] += 1
+                          elif compliance_type == 'NON_COMPLIANT':
+                              compliance_metrics['NON_COMPLIANT'] += 1
+                          else:
+                              compliance_metrics['NOT_APPLICABLE'] += 1
+                      
+                      # Get detailed compliance information for non-compliant resources
+                      if rule_metrics[rule_name]['NON_COMPLIANT'] > 0:
+                          details = config.get_compliance_details_by_config_rule(
+                              ConfigRuleName=rule_name,
+                              ComplianceTypes=['NON_COMPLIANT']
+                          )
+                          
+                          for eval_result in details.get('EvaluationResults', []):
+                              resource_type = eval_result.get('EvaluationResultIdentifier', {}).get('EvaluationResultQualifier', {}).get('ResourceType')
+                              
+                              if resource_type:
+                                  if resource_type not in resource_type_metrics:
+                                      resource_type_metrics[resource_type] = {
+                                          'NON_COMPLIANT': 0
+                                      }
+                                  
+                                  resource_type_metrics[resource_type]['NON_COMPLIANT'] += 1
+                  except Exception as e:
+                      print(f"Error processing rule {rule_name}: {str(e)}")
+              
+              # Store historical compliance data in S3
+              timestamp = datetime.datetime.now().strftime('%Y-%m-%d-%H-%M-%S')
+              historical_data = {
+                  'timestamp': timestamp,
+                  'overall_compliance': compliance_metrics,
+                  'rule_compliance': rule_metrics,
+                  'resource_type_compliance': resource_type_metrics
+              }
+              
+              try:
+                  s3.put_object(
+                      Bucket=os.environ['CONFIG_BUCKET_NAME'],
+                      Key=f'compliance-history/{timestamp}.json',
+                      Body=json.dumps(historical_data)
+                  )
+              except Exception as e:
+                  print(f"Error storing historical data: {str(e)}")
+              
+              # Generate trend data by reading historical data
+              try:
+                  response = s3.list_objects_v2(
+                      Bucket=os.environ['CONFIG_BUCKET_NAME'],
+                      Prefix='compliance-history/'
+                  )
+                  
+                  historical_files = [obj['Key'] for obj in response.get('Contents', []) if obj['Key'].endswith('.json')]
+                  historical_files.sort()
+                  
+                  # Limit to last 30 data points for trend analysis
+                  historical_files = historical_files[-30:]
+                  
+                  trend_data = {
+                      'timestamps': [],
+                      'compliant_rules': [],
+                      'non_compliant_rules': [],
+                      'top_non_compliant_resources': {}
+                  }
+                  
+                  for file_key in historical_files:
+                      try:
+                          obj = s3.get_object(Bucket=os.environ['CONFIG_BUCKET_NAME'], Key=file_key)
+                          data = json.loads(obj['Body'].read().decode('utf-8'))
+                          
+                          trend_data['timestamps'].append(data['timestamp'])
+                          trend_data['compliant_rules'].append(data['overall_compliance']['COMPLIANT'])
+                          trend_data['non_compliant_rules'].append(data['overall_compliance']['NON_COMPLIANT'])
+                          
+                          # Track top non-compliant resource types
+                          for resource_type, metrics in data.get('resource_type_compliance', {}).items():
+                              if resource_type not in trend_data['top_non_compliant_resources']:
+                                  trend_data['top_non_compliant_resources'][resource_type] = []
+                              
+                              # Pad with zeros for missing data points
+                              while len(trend_data['top_non_compliant_resources'][resource_type]) < len(trend_data['timestamps']) - 1:
+                                  trend_data['top_non_compliant_resources'][resource_type].append(0)
+                              
+                              trend_data['top_non_compliant_resources'][resource_type].append(metrics['NON_COMPLIANT'])
+                      except Exception as e:
+                          print(f"Error processing historical file {file_key}: {str(e)}")
+                  
+                  # Store trend analysis
+                  s3.put_object(
+                      Bucket=os.environ['CONFIG_BUCKET_NAME'],
+                      Key='compliance-history/trend-analysis.json',
+                      Body=json.dumps(trend_data)
+                  )
+              except Exception as e:
+                  print(f"Error generating trend data: {str(e)}")
+              
+              # Publish overall metrics
+              cloudwatch.put_metric_data(
+                  Namespace='AWS/Config',
+                  MetricData=[
+                      {
+                          'MetricName': 'CompliantRules',
+                          'Value': compliance_metrics['COMPLIANT'],
+                          'Unit': 'Count',
+                          'Timestamp': datetime.datetime.now()
+                      },
+                      {
+                          'MetricName': 'NonCompliantRules',
+                          'Value': compliance_metrics['NON_COMPLIANT'],
+                          'Unit': 'Count',
+                          'Timestamp': datetime.datetime.now()
+                      },
+                      {
+                          'MetricName': 'NotApplicableRules',
+                          'Value': compliance_metrics['NOT_APPLICABLE'],
+                          'Unit': 'Count',
+                          'Timestamp': datetime.datetime.now()
+                      }
+                  ]
+              )
+              
+              # Publish rule-specific metrics
+              for rule_name, metrics in rule_metrics.items():
+                  cloudwatch.put_metric_data(
+                      Namespace='AWS/Config/Rules',
+                      MetricData=[
+                          {
+                              'MetricName': 'CompliantResources',
+                              'Value': metrics['COMPLIANT'],
+                              'Unit': 'Count',
+                              'Dimensions': [
+                                  {
+                                      'Name': 'RuleName',
+                                      'Value': rule_name
+                                  }
+                              ],
+                              'Timestamp': datetime.datetime.now()
+                          },
+                          {
+                              'MetricName': 'NonCompliantResources',
+                              'Value': metrics['NON_COMPLIANT'],
+                              'Unit': 'Count',
+                              'Dimensions': [
+                                  {
+                                      'Name': 'RuleName',
+                                      'Value': rule_name
+                                  }
+                              ],
+                              'Timestamp': datetime.datetime.now()
+                          }
+                      ]
+                  )
+              
+              # Publish resource type metrics
+              for resource_type, metrics in resource_type_metrics.items():
+                  cloudwatch.put_metric_data(
+                      Namespace='AWS/Config/ResourceTypes',
+                      MetricData=[
+                          {
+                              'MetricName': 'NonCompliantResources',
+                              'Value': metrics['NON_COMPLIANT'],
+                              'Unit': 'Count',
+                              'Dimensions': [
+                                  {
+                                      'Name': 'ResourceType',
+                                      'Value': resource_type
+                                  }
+                              ],
+                              'Timestamp': datetime.datetime.now()
+                          }
+                      ]
+                  )
+              
+              return {
+                  'statusCode': 200,
+                  'body': 'Successfully published compliance metrics to CloudWatch'
+              }
+      Environment:
+        Variables:
+          CONFIG_BUCKET_NAME: !Ref ConfigBucketName
+
+  ComplianceTrendAnalysisLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.handler
+      Role: !GetAtt ComplianceMetricsLambdaRole.Arn
+      Runtime: python3.9
+      Timeout: 60
+      Code:
+        ZipFile: |
+          import boto3
+          import os
+          import datetime
+          import json
+          import time
+          
+          def handler(event, context):
+              """
+              Lambda function to generate compliance trend analysis reports
+              """
+              s3 = boto3.client('s3')
+              
+              try:
+                  # Get the trend analysis data
+                  obj = s3.get_object(
+                      Bucket=os.environ['CONFIG_BUCKET_NAME'],
+                      Key='compliance-history/trend-analysis.json'
+                  )
+                  trend_data = json.loads(obj['Body'].read().decode('utf-8'))
+                  
+                  # Generate HTML report
+                  html_report = generate_html_report(trend_data)
+                  
+                  # Store the HTML report
+                  s3.put_object(
+                      Bucket=os.environ['CONFIG_BUCKET_NAME'],
+                      Key='compliance-history/trend-report.html',
+                      Body=html_report,
+                      ContentType='text/html'
+                  )
+                  
+                  return {
+                      'statusCode': 200,
+                      'body': 'Successfully generated compliance trend report'
+                  }
+              except Exception as e:
+                  print(f"Error generating trend report: {str(e)}")
+                  return {
+                      'statusCode': 500,
+                      'body': f"Error generating trend report: {str(e)}"
+                  }
+          
+          def generate_html_report(trend_data):
+              """
+              Generate an HTML report from trend data
+              """
+              timestamps = trend_data.get('timestamps', [])
+              compliant_rules = trend_data.get('compliant_rules', [])
+              non_compliant_rules = trend_data.get('non_compliant_rules', [])
+              top_non_compliant_resources = trend_data.get('top_non_compliant_resources', {})
+              
+              # Format timestamps for display
+              display_timestamps = []
+              for ts in timestamps:
+                  try:
+                      # Convert from format 'YYYY-MM-DD-HH-MM-SS' to 'MM/DD HH:MM'
+                      parts = ts.split('-')
+                      if len(parts) >= 5:
+                          display_timestamps.append(f"{parts[1]}/{parts[2]} {parts[3]}:{parts[4]}")
+                      else:
+                          display_timestamps.append(ts)
+                  except:
+                      display_timestamps.append(ts)
+              
+              # Start building the HTML report
+              html = f"""
+              <!DOCTYPE html>
+              <html>
+              <head>
+                  <title>AWS Config Compliance Trend Report</title>
+                  <style>
+                      body {{ font-family: Arial, sans-serif; margin: 20px; }}
+                      h1, h2 {{ color: #0073bb; }}
+                      .chart-container {{ width: 100%; height: 400px; margin-bottom: 30px; }}
+                      table {{ border-collapse: collapse; width: 100%; margin-bottom: 30px; }}
+                      th, td {{ border: 1px solid #ddd; padding: 8px; text-align: left; }}
+                      th {{ background-color: #f2f2f2; }}
+                      tr:nth-child(even) {{ background-color: #f9f9f9; }}
+                  </style>
+                  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+              </head>
+              <body>
+                  <h1>AWS Config Compliance Trend Report</h1>
+                  <p>Generated on: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
+                  
+                  <h2>Compliance Trend Over Time</h2>
+                  <div class="chart-container">
+                      <canvas id="complianceTrendChart"></canvas>
+                  </div>
+                  
+                  <h2>Top Non-Compliant Resource Types</h2>
+                  <div class="chart-container">
+                      <canvas id="resourceTypeChart"></canvas>
+                  </div>
+                  
+                  <h2>Compliance Summary</h2>
+                  <table>
+                      <tr>
+                          <th>Date</th>
+                          <th>Compliant Rules</th>
+                          <th>Non-Compliant Rules</th>
+                          <th>Compliance Rate</th>
+                      </tr>
+              """
+              
+              # Add table rows for each data point
+              for i in range(len(timestamps)):
+                  if i < len(compliant_rules) and i < len(non_compliant_rules):
+                      total = compliant_rules[i] + non_compliant_rules[i]
+                      compliance_rate = (compliant_rules[i] / total * 100) if total > 0 else 0
+                      
+                      html += f"""
+                      <tr>
+                          <td>{display_timestamps[i] if i < len(display_timestamps) else ''}</td>
+                          <td>{compliant_rules[i]}</td>
+                          <td>{non_compliant_rules[i]}</td>
+                          <td>{compliance_rate:.2f}%</td>
+                      </tr>
+                      """
+              
+              # Close the table
+              html += "</table>"
+              
+              # Add JavaScript for charts
+              html += f"""
+                  <script>
+                      // Compliance Trend Chart
+                      const complianceTrendCtx = document.getElementById('complianceTrendChart').getContext('2d');
+                      new Chart(complianceTrendCtx, {{
+                          type: 'line',
+                          data: {{
+                              labels: {json.dumps(display_timestamps)},
+                              datasets: [
+                                  {{
+                                      label: 'Compliant Rules',
+                                      data: {json.dumps(compliant_rules)},
+                                      borderColor: 'rgba(75, 192, 192, 1)',
+                                      backgroundColor: 'rgba(75, 192, 192, 0.2)',
+                                      tension: 0.1
+                                  }},
+                                  {{
+                                      label: 'Non-Compliant Rules',
+                                      data: {json.dumps(non_compliant_rules)},
+                                      borderColor: 'rgba(255, 99, 132, 1)',
+                                      backgroundColor: 'rgba(255, 99, 132, 0.2)',
+                                      tension: 0.1
+                                  }}
+                              ]
+                          }},
+                          options: {{
+                              responsive: true,
+                              maintainAspectRatio: false,
+                              scales: {{
+                                  y: {{
+                                      beginAtZero: true,
+                                      title: {{
+                                          display: true,
+                                          text: 'Number of Rules'
+                                      }}
+                                  }},
+                                  x: {{
+                                      title: {{
+                                          display: true,
+                                          text: 'Date/Time'
+                                      }}
+                                  }}
+                              }}
+                          }}
+                      }});
+                      
+                      // Resource Type Chart
+                      const resourceTypeCtx = document.getElementById('resourceTypeChart').getContext('2d');
+                      const resourceTypeData = {{}};
+                      const resourceTypeColors = [
+                          'rgba(255, 99, 132, 0.2)',
+                          'rgba(54, 162, 235, 0.2)',
+                          'rgba(255, 206, 86, 0.2)',
+                          'rgba(75, 192, 192, 0.2)',
+                          'rgba(153, 102, 255, 0.2)',
+                          'rgba(255, 159, 64, 0.2)'
+                      ];
+                      const resourceTypeBorders = [
+                          'rgba(255, 99, 132, 1)',
+                          'rgba(54, 162, 235, 1)',
+                          'rgba(255, 206, 86, 1)',
+                          'rgba(75, 192, 192, 1)',
+                          'rgba(153, 102, 255, 1)',
+                          'rgba(255, 159, 64, 1)'
+                      ];
+                      
+                      const resourceTypeDatasets = [];
+                      let colorIndex = 0;
+              """
+              
+              # Add datasets for each resource type
+              for resource_type, values in top_non_compliant_resources.items():
+                  html += f"""
+                      resourceTypeDatasets.push({{
+                          label: '{resource_type}',
+                          data: {json.dumps(values)},
+                          borderColor: resourceTypeBorders[colorIndex % resourceTypeBorders.length],
+                          backgroundColor: resourceTypeColors[colorIndex % resourceTypeColors.length],
+                          tension: 0.1
+                      }});
+                      colorIndex++;
+                  """
+              
+              # Complete the JavaScript
+              html += """
+                      new Chart(resourceTypeCtx, {
+                          type: 'line',
+                          data: {
+                              labels: display_timestamps,
+                              datasets: resourceTypeDatasets
+                          },
+                          options: {
+                              responsive: true,
+                              maintainAspectRatio: false,
+                              scales: {
+                                  y: {
+                                      beginAtZero: true,
+                                      title: {
+                                          display: true,
+                                          text: 'Number of Non-Compliant Resources'
+                                      }
+                                  },
+                                  x: {
+                                      title: {
+                                          display: true,
+                                          text: 'Date/Time'
+                                      }
+                                  }
+                              }
+                          }
+                      });
+                  </script>
+              </body>
+              </html>
+              """
+              
+              return html
+      Environment:
+        Variables:
+          CONFIG_BUCKET_NAME: !Ref ConfigBucketName
+
+  ComplianceMetricsSchedule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: 'Schedule for AWS Config compliance metrics collection'
+      ScheduleExpression: 'rate(1 hour)'
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt ComplianceMetricsLambda.Arn
+          Id: ComplianceMetricsTarget
+
+  ComplianceTrendAnalysisSchedule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: 'Schedule for AWS Config compliance trend analysis'
+      ScheduleExpression: 'rate(6 hours)'
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt ComplianceTrendAnalysisLambda.Arn
+          Id: ComplianceTrendAnalysisTarget
+
+  ComplianceMetricsPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref ComplianceMetricsLambda
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt ComplianceMetricsSchedule.Arn
+
+  ComplianceTrendAnalysisPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref ComplianceTrendAnalysisLambda
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt ComplianceTrendAnalysisSchedule.Arn
+
+  ComplianceDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: AWS-Config-Compliance-Dashboard
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "metric",
+              "x": 0,
+              "y": 0,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  [ "AWS/Config", "CompliantRules", { "stat": "Sum", "period": 3600 } ],
+                  [ ".", "NonCompliantRules", { "stat": "Sum", "period": 3600 } ],
+                  [ ".", "NotApplicableRules", { "stat": "Sum", "period": 3600 } ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "Overall Compliance Status",
+                "period": 300
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12,
+              "y": 0,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  [ "AWS/Config", "CompliantRules", { "stat": "Sum", "period": 3600 } ],
+                  [ ".", "NonCompliantRules", { "stat": "Sum", "period": 3600 } ]
+                ],
+                "view": "pie",
+                "region": "${AWS::Region}",
+                "title": "Compliance Distribution",
+                "period": 300
+              }
+            },
+            {
+              "type": "metric",
+              "x": 0,
+              "y": 6,
+              "width": 24,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  [ "AWS/Config/Rules", "NonCompliantResources", "RuleName", "s3-bucket-server-side-encryption-enabled", { "stat": "Maximum" } ],
+                  [ "...", "encrypted-volumes", { "stat": "Maximum" } ],
+                  [ "...", "restricted-ssh", { "stat": "Maximum" } ],
+                  [ "...", "s3-public-access-blocked", { "stat": "Maximum" } ],
+                  [ "...", "iam-user-mfa-enabled", { "stat": "Maximum" } ],
+                  [ "...", "ec2-approved-instance-types", { "stat": "Maximum" } ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "Non-Compliant Resources by Rule",
+                "period": 3600
+              }
+            },
+            {
+              "type": "metric",
+              "x": 0,
+              "y": 12,
+              "width": 24,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  [ "AWS/Config/ResourceTypes", "NonCompliantResources", "ResourceType", "AWS::S3::Bucket", { "stat": "Maximum" } ],
+                  [ "...", "AWS::EC2::Instance", { "stat": "Maximum" } ],
+                  [ "...", "AWS::EC2::Volume", { "stat": "Maximum" } ],
+                  [ "...", "AWS::IAM::User", { "stat": "Maximum" } ],
+                  [ "...", "AWS::RDS::DBInstance", { "stat": "Maximum" } ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "Non-Compliant Resources by Type",
+                "period": 3600
+              }
+            },
+            {
+              "type": "text",
+              "x": 0,
+              "y": 18,
+              "width": 24,
+              "height": 3,
+              "properties": {
+                "markdown": "# AWS Config Compliance Dashboard\n\nThis dashboard provides visibility into your AWS Config compliance status. It shows the number of compliant and non-compliant rules, as well as the number of non-compliant resources for each rule and resource type.\n\n**Key Metrics:**\n* **Compliant Rules**: Number of AWS Config rules that are compliant\n* **Non-Compliant Rules**: Number of AWS Config rules that are non-compliant\n* **Non-Compliant Resources by Rule**: Number of resources that are non-compliant for each rule\n* **Non-Compliant Resources by Type**: Number of non-compliant resources by resource type\n\nFor detailed trend analysis, view the [Compliance Trend Report](https://s3.console.aws.amazon.com/s3/object/${ConfigBucketName}/compliance-history/trend-report.html)"
+              }
+            }
+          ]
+        }
+
+Outputs:
+  ComplianceDashboardURL:
+    Description: URL to the AWS Config Compliance Dashboard
+    Value: !Sub https://${AWS::Region}.console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#dashboards:name=${ComplianceDashboard}
+  
+  ComplianceMetricsLambdaArn:
+    Description: ARN of the Lambda function that collects compliance metrics
+    Value: !GetAtt ComplianceMetricsLambda.Arn
+  
+  ComplianceTrendReportURL:
+    Description: URL to the Compliance Trend Report
+    Value: !Sub https://s3.console.aws.amazon.com/s3/object/${ConfigBucketName}/compliance-history/trend-report.html

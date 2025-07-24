@@ -1,0 +1,27 @@
+{
+  "ConfigRuleName": "ec2-approved-instance-types",
+  "Description": "Checks if EC2 instances are using approved instance types",
+  "Source": {
+    "Owner": "CUSTOM_LAMBDA",
+    "SourceIdentifier": "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:EC2InstanceTypesConfigRule",
+    "SourceDetails": [
+      {
+        "EventSource": "aws.config",
+        "MessageType": "ConfigurationItemChangeNotification"
+      },
+      {
+        "EventSource": "aws.config",
+        "MessageType": "OversizedConfigurationItemChangeNotification"
+      }
+    ]
+  },
+  "InputParameters": {
+    "approvedInstanceTypes": "t2.micro,t3.micro,t3.small,t4g.micro,t4g.small"
+  },
+  "Scope": {
+    "ComplianceResourceTypes": [
+      "AWS::EC2::Instance"
+    ]
+  },
+  "MaximumExecutionFrequency": "TwentyFour_Hours"
+}

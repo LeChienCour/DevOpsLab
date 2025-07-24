@@ -1,0 +1,276 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'AWS Config Compliance Dashboard'
+
+Parameters:
+  ConfigBucketName:
+    Type: String
+    Description: Name of the S3 bucket where AWS Config stores configuration history
+
+Resources:
+  ComplianceMetricsLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: ConfigComplianceMetricsAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - config:DescribeComplianceByConfigRule
+                  - config:DescribeComplianceByResource
+                  - config:GetComplianceDetailsByConfigRule
+                  - config:GetComplianceDetailsByResource
+                  - config:ListDiscoveredResources
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - cloudwatch:PutMetricData
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub arn:aws:s3:::${ConfigBucketName}
+                  - !Sub arn:aws:s3:::${ConfigBucketName}/*
+
+  ComplianceMetricsLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.handler
+      Role: !GetAtt ComplianceMetricsLambdaRole.Arn
+      Runtime: python3.9
+      Timeout: 60
+      Code:
+        ZipFile: |
+          import boto3
+          import os
+          import datetime
+          
+          def handler(event, context):
+              """
+              Lambda function to collect AWS Config compliance metrics and publish to CloudWatch
+              """
+              config = boto3.client('config')
+              cloudwatch = boto3.client('cloudwatch')
+              
+              # Get all Config rules
+              rules_response = config.describe_config_rules()
+              rules = rules_response['ConfigRules']
+              
+              # Get compliance status for each rule
+              compliance_metrics = {
+                  'COMPLIANT': 0,
+                  'NON_COMPLIANT': 0,
+                  'NOT_APPLICABLE': 0
+              }
+              
+              rule_metrics = {}
+              
+              for rule in rules:
+                  rule_name = rule['ConfigRuleName']
+                  rule_metrics[rule_name] = {
+                      'COMPLIANT': 0,
+                      'NON_COMPLIANT': 0,
+                      'NOT_APPLICABLE': 0
+                  }
+                  
+                  try:
+                      compliance = config.describe_compliance_by_config_rule(
+                          ConfigRuleNames=[rule_name]
+                      )
+                      
+                      for result in compliance['ComplianceByConfigRules']:
+                          compliance_type = result.get('Compliance', {}).get('ComplianceType', 'NOT_APPLICABLE')
+                          compliance_count = result.get('Compliance', {}).get('ComplianceContributorCount', {})
+                          
+                          compliant_count = compliance_count.get('CappedCount', 0) if compliance_count.get('ComplianceType') == 'COMPLIANT' else 0
+                          non_compliant_count = compliance_count.get('CappedCount', 0) if compliance_count.get('ComplianceType') == 'NON_COMPLIANT' else 0
+                          
+                          rule_metrics[rule_name]['COMPLIANT'] += compliant_count
+                          rule_metrics[rule_name]['NON_COMPLIANT'] += non_compliant_count
+                          
+                          if compliance_type == 'COMPLIANT':
+                              compliance_metrics['COMPLIANT'] += 1
+                          elif compliance_type == 'NON_COMPLIANT':
+                              compliance_metrics['NON_COMPLIANT'] += 1
+                          else:
+                              compliance_metrics['NOT_APPLICABLE'] += 1
+                  except Exception as e:
+                      print(f"Error processing rule {rule_name}: {str(e)}")
+              
+              # Publish overall metrics
+              cloudwatch.put_metric_data(
+                  Namespace='AWS/Config',
+                  MetricData=[
+                      {
+                          'MetricName': 'CompliantRules',
+                          'Value': compliance_metrics['COMPLIANT'],
+                          'Unit': 'Count',
+                          'Timestamp': datetime.datetime.now()
+                      },
+                      {
+                          'MetricName': 'NonCompliantRules',
+                          'Value': compliance_metrics['NON_COMPLIANT'],
+                          'Unit': 'Count',
+                          'Timestamp': datetime.datetime.now()
+                      },
+                      {
+                          'MetricName': 'NotApplicableRules',
+                          'Value': compliance_metrics['NOT_APPLICABLE'],
+                          'Unit': 'Count',
+                          'Timestamp': datetime.datetime.now()
+                      }
+                  ]
+              )
+              
+              # Publish rule-specific metrics
+              for rule_name, metrics in rule_metrics.items():
+                  cloudwatch.put_metric_data(
+                      Namespace='AWS/Config/Rules',
+                      MetricData=[
+                          {
+                              'MetricName': 'CompliantResources',
+                              'Value': metrics['COMPLIANT'],
+                              'Unit': 'Count',
+                              'Dimensions': [
+                                  {
+                                      'Name': 'RuleName',
+                                      'Value': rule_name
+                                  }
+                              ],
+                              'Timestamp': datetime.datetime.now()
+                          },
+                          {
+                              'MetricName': 'NonCompliantResources',
+                              'Value': metrics['NON_COMPLIANT'],
+                              'Unit': 'Count',
+                              'Dimensions': [
+                                  {
+                                      'Name': 'RuleName',
+                                      'Value': rule_name
+                                  }
+                              ],
+                              'Timestamp': datetime.datetime.now()
+                          }
+                      ]
+                  )
+              
+              return {
+                  'statusCode': 200,
+                  'body': 'Successfully published compliance metrics to CloudWatch'
+              }
+
+  ComplianceMetricsSchedule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: 'Schedule for AWS Config compliance metrics collection'
+      ScheduleExpression: 'rate(1 hour)'
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt ComplianceMetricsLambda.Arn
+          Id: ComplianceMetricsTarget
+
+  ComplianceMetricsPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref ComplianceMetricsLambda
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt ComplianceMetricsSchedule.Arn
+
+  ComplianceDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: AWS-Config-Compliance-Dashboard
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "metric",
+              "x": 0,
+              "y": 0,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  [ "AWS/Config", "CompliantRules", { "stat": "Sum", "period": 3600 } ],
+                  [ ".", "NonCompliantRules", { "stat": "Sum", "period": 3600 } ],
+                  [ ".", "NotApplicableRules", { "stat": "Sum", "period": 3600 } ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "Overall Compliance Status",
+                "period": 300
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12,
+              "y": 0,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  [ "AWS/Config", "CompliantRules", { "stat": "Sum", "period": 3600 } ],
+                  [ ".", "NonCompliantRules", { "stat": "Sum", "period": 3600 } ]
+                ],
+                "view": "pie",
+                "region": "${AWS::Region}",
+                "title": "Compliance Distribution",
+                "period": 300
+              }
+            },
+            {
+              "type": "metric",
+              "x": 0,
+              "y": 6,
+              "width": 24,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  [ "AWS/Config/Rules", "NonCompliantResources", "RuleName", "s3-bucket-server-side-encryption-enabled", { "stat": "Maximum" } ],
+                  [ "...", "encrypted-volumes", { "stat": "Maximum" } ],
+                  [ "...", "restricted-ssh", { "stat": "Maximum" } ],
+                  [ "...", "rds-storage-encrypted", { "stat": "Maximum" } ],
+                  [ "...", "iam-password-policy", { "stat": "Maximum" } ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "Non-Compliant Resources by Rule",
+                "period": 3600
+              }
+            },
+            {
+              "type": "text",
+              "x": 0,
+              "y": 12,
+              "width": 24,
+              "height": 3,
+              "properties": {
+                "markdown": "# AWS Config Compliance Dashboard\n\nThis dashboard provides visibility into your AWS Config compliance status. It shows the number of compliant and non-compliant rules, as well as the number of non-compliant resources for each rule.\n\n**Key Metrics:**\n* **Compliant Rules**: Number of AWS Config rules that are compliant\n* **Non-Compliant Rules**: Number of AWS Config rules that are non-compliant\n* **Non-Compliant Resources by Rule**: Number of resources that are non-compliant for each rule"
+              }
+            }
+          ]
+        }
+
+Outputs:
+  ComplianceDashboardURL:
+    Description: URL to the AWS Config Compliance Dashboard
+    Value: !Sub https://${AWS::Region}.console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#dashboards:name=${ComplianceDashboard}
+  
+  ComplianceMetricsLambdaArn:
+    Description: ARN of the Lambda function that collects compliance metrics
+    Value: !GetAtt ComplianceMetricsLambda.Arn

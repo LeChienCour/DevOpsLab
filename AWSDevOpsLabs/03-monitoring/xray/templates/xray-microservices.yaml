@@ -1,0 +1,427 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'AWS X-Ray Distributed Tracing Lab - Microservices Infrastructure'
+
+Parameters:
+  EnvironmentName:
+    Description: Environment name for resource naming
+    Type: String
+    Default: xray-lab
+
+Resources:
+  # IAM Roles
+  XRayLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${EnvironmentName}-lambda-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/AWSXRayDaemonWriteAccess
+        - arn:aws:iam::aws:policy/AmazonDynamoDBFullAccess
+
+  # DynamoDB Tables
+  UserProfilesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: UserProfiles
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: userId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: userId
+          KeyType: HASH
+
+  OrdersTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: Orders
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: orderId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: orderId
+          KeyType: HASH
+
+  # X-Ray Sampling Rules
+  HighPriorityServiceRule:
+    Type: AWS::XRay::SamplingRule
+    Properties:
+      SamplingRule:
+        RuleName: high-priority-services
+        Priority: 5
+        FixedRate: 0.5
+        ReservoirSize: 2
+        ServiceName: user-service
+        ServiceType: '*'
+        Host: '*'
+        HTTPMethod: '*'
+        URLPath: '/api/users/*'
+        Version: 1
+        Attributes: {}
+
+  OrderServiceRule:
+    Type: AWS::XRay::SamplingRule
+    Properties:
+      SamplingRule:
+        RuleName: order-service
+        Priority: 10
+        FixedRate: 0.3
+        ReservoirSize: 1
+        ServiceName: order-service
+        ServiceType: '*'
+        Host: '*'
+        HTTPMethod: '*'
+        URLPath: '/api/orders/*'
+        Version: 1
+        Attributes: {}
+
+  # API Gateway
+  MicroservicesApi:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: !Sub ${EnvironmentName}-api
+      Description: API for X-Ray microservices lab
+      EndpointConfiguration:
+        Types:
+          - REGIONAL
+
+  # API Gateway Resources
+  UsersResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref MicroservicesApi
+      ParentId: !GetAtt MicroservicesApi.RootResourceId
+      PathPart: users
+
+  UserIdResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref MicroservicesApi
+      ParentId: !Ref UsersResource
+      PathPart: '{userId}'
+
+  OrdersResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref MicroservicesApi
+      ParentId: !GetAtt MicroservicesApi.RootResourceId
+      PathPart: orders
+
+  OrderIdResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref MicroservicesApi
+      ParentId: !Ref OrdersResource
+      PathPart: '{orderId}'
+
+  # API Gateway Deployment
+  ApiDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn:
+      - UserGetMethod
+      - OrderGetMethod
+    Properties:
+      RestApiId: !Ref MicroservicesApi
+      StageName: prod
+
+  # Enable X-Ray Tracing on API Gateway Stage
+  ApiStage:
+    Type: AWS::ApiGateway::Stage
+    Properties:
+      RestApiId: !Ref MicroservicesApi
+      DeploymentId: !Ref ApiDeployment
+      StageName: prod
+      TracingEnabled: true
+
+  # User Service API Method
+  UserGetMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref MicroservicesApi
+      ResourceId: !Ref UserIdResource
+      HttpMethod: GET
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${UserServiceFunction.Arn}/invocations
+
+  # Order Service API Method
+  OrderGetMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref MicroservicesApi
+      ResourceId: !Ref OrderIdResource
+      HttpMethod: GET
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${OrderServiceFunction.Arn}/invocations
+
+  # Lambda Functions
+  UserServiceFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: user-service
+      Handler: lambda_function.lambda_handler
+      Role: !GetAtt XRayLambdaRole.Arn
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+          from aws_xray_sdk.core import xray_recorder
+          from aws_xray_sdk.core import patch_all
+
+          # Patch AWS SDK calls for automatic tracing
+          patch_all()
+
+          dynamodb = boto3.resource('dynamodb')
+          table = dynamodb.Table('UserProfiles')
+
+          @xray_recorder.capture('lambda_handler')
+          def lambda_handler(event, context):
+              # Create a custom segment for business logic
+              subsegment = xray_recorder.begin_subsegment('user_processing')
+              
+              try:
+                  # Add annotations for filtering traces
+                  xray_recorder.put_annotation('service', 'user-service')
+                  xray_recorder.put_annotation('operation', event.get('httpMethod', 'unknown'))
+                  
+                  # Add metadata for additional context
+                  xray_recorder.put_metadata('request_info', {
+                      'path': event.get('path', ''),
+                      'user_agent': event.get('headers', {}).get('User-Agent', ''),
+                      'source_ip': event.get('requestContext', {}).get('identity', {}).get('sourceIp', '')
+                  })
+                  
+                  # Extract user ID from path
+                  path_parts = event.get('path', '').split('/')
+                  user_id = path_parts[-1] if len(path_parts) > 2 else 'user123'
+                  
+                  # Simulate some processing time
+                  import time
+                  time.sleep(0.1)
+                  
+                  # Get user from DynamoDB
+                  response = table.get_item(Key={'userId': user_id})
+                  
+                  if 'Item' in response:
+                      user_data = response['Item']
+                      # Convert DynamoDB types to regular Python types
+                      user_profile = {
+                          'userId': user_data['userId'],
+                          'name': user_data['name'],
+                          'email': user_data['email'],
+                          'preferences': user_data['preferences']
+                      }
+                      
+                      xray_recorder.put_annotation('user_found', True)
+                      
+                      return {
+                          'statusCode': 200,
+                          'headers': {
+                              'Content-Type': 'application/json',
+                              'Access-Control-Allow-Origin': '*'
+                          },
+                          'body': json.dumps(user_profile)
+                      }
+                  else:
+                      xray_recorder.put_annotation('user_found', False)
+                      
+                      return {
+                          'statusCode': 404,
+                          'headers': {
+                              'Content-Type': 'application/json',
+                              'Access-Control-Allow-Origin': '*'
+                          },
+                          'body': json.dumps({'error': 'User not found'})
+                      }
+                      
+              except Exception as e:
+                  xray_recorder.put_annotation('error', True)
+                  xray_recorder.put_metadata('error_details', str(e))
+                  
+                  return {
+                      'statusCode': 500,
+                      'headers': {
+                          'Content-Type': 'application/json',
+                          'Access-Control-Allow-Origin': '*'
+                      },
+                      'body': json.dumps({'error': 'Internal server error'})
+                  }
+              finally:
+                  xray_recorder.end_subsegment()
+      Runtime: python3.9
+      Timeout: 30
+      MemorySize: 128
+      Layers:
+        - !Sub arn:aws:lambda:${AWS::Region}:580247275435:layer:LambdaInsightsExtension:14
+      TracingConfig:
+        Mode: Active
+      Environment:
+        Variables:
+          LOG_LEVEL: INFO
+
+  OrderServiceFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: order-service
+      Handler: lambda_function.lambda_handler
+      Role: !GetAtt XRayLambdaRole.Arn
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+          import uuid
+          from aws_xray_sdk.core import xray_recorder
+          from aws_xray_sdk.core import patch_all
+
+          # Patch AWS SDK calls for automatic tracing
+          patch_all()
+
+          dynamodb = boto3.resource('dynamodb')
+          orders_table = dynamodb.Table('Orders')
+          users_table = dynamodb.Table('UserProfiles')
+
+          @xray_recorder.capture('lambda_handler')
+          def lambda_handler(event, context):
+              # Create a custom segment for order processing
+              subsegment = xray_recorder.begin_subsegment('order_processing')
+              
+              try:
+                  # Add annotations for filtering traces
+                  xray_recorder.put_annotation('service', 'order-service')
+                  xray_recorder.put_annotation('operation', event.get('httpMethod', 'unknown'))
+                  
+                  # Add metadata for additional context
+                  xray_recorder.put_metadata('request_info', {
+                      'path': event.get('path', ''),
+                      'method': event.get('httpMethod', ''),
+                      'query_params': event.get('queryStringParameters', {})
+                  })
+                  
+                  # Extract order ID from path
+                  path_parts = event.get('path', '').split('/')
+                  order_id = path_parts[-1] if len(path_parts) > 2 else 'order123'
+                  
+                  # Simulate some processing time
+                  import time
+                  time.sleep(0.15)
+                  
+                  # Get order from DynamoDB
+                  with xray_recorder.in_subsegment('get_order_details') as subsegment:
+                      response = orders_table.get_item(Key={'orderId': order_id})
+                      
+                      if 'Item' not in response:
+                          xray_recorder.put_annotation('order_found', False)
+                          return {
+                              'statusCode': 404,
+                              'headers': {
+                                  'Content-Type': 'application/json',
+                                  'Access-Control-Allow-Origin': '*'
+                              },
+                              'body': json.dumps({'error': 'Order not found'})
+                          }
+                      
+                      order_data = response['Item']
+                      xray_recorder.put_annotation('order_found', True)
+                  
+                  # Get user details for the order
+                  with xray_recorder.in_subsegment('get_user_details') as subsegment:
+                      user_id = order_data.get('userId', 'unknown')
+                      user_response = users_table.get_item(Key={'userId': user_id})
+                      
+                      if 'Item' in user_response:
+                          user_data = user_response['Item']
+                          user_name = user_data.get('name', 'Unknown User')
+                          xray_recorder.put_annotation('user_found', True)
+                      else:
+                          user_name = 'Unknown User'
+                          xray_recorder.put_annotation('user_found', False)
+                  
+                  # Combine order and user data
+                  order_details = {
+                      'orderId': order_data['orderId'],
+                      'userId': user_id,
+                      'userName': user_name,
+                      'items': order_data.get('items', []),
+                      'total': order_data.get('total', 0),
+                      'status': order_data.get('status', 'unknown'),
+                      'createdAt': order_data.get('createdAt', '')
+                  }
+                  
+                  return {
+                      'statusCode': 200,
+                      'headers': {
+                          'Content-Type': 'application/json',
+                          'Access-Control-Allow-Origin': '*'
+                      },
+                      'body': json.dumps(order_details)
+                  }
+                  
+              except Exception as e:
+                  xray_recorder.put_annotation('error', True)
+                  xray_recorder.put_metadata('error_details', str(e))
+                  
+                  return {
+                      'statusCode': 500,
+                      'headers': {
+                          'Content-Type': 'application/json',
+                          'Access-Control-Allow-Origin': '*'
+                      },
+                      'body': json.dumps({'error': 'Internal server error'})
+                  }
+              finally:
+                  xray_recorder.end_subsegment()
+      Runtime: python3.9
+      Timeout: 30
+      MemorySize: 128
+      Layers:
+        - !Sub arn:aws:lambda:${AWS::Region}:580247275435:layer:LambdaInsightsExtension:14
+      TracingConfig:
+        Mode: Active
+      Environment:
+        Variables:
+          LOG_LEVEL: INFO
+
+  # Lambda Permissions
+  UserServicePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref UserServiceFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${MicroservicesApi}/*/*
+
+  OrderServicePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref OrderServiceFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${MicroservicesApi}/*/*
+
+Outputs:
+  ApiEndpoint:
+    Description: API Gateway endpoint URL
+    Value: !Sub https://${MicroservicesApi}.execute-api.${AWS::Region}.amazonaws.com/prod/
+  
+  UserServiceEndpoint:
+    Description: User service endpoint
+    Value: !Sub https://${MicroservicesApi}.execute-api.${AWS::Region}.amazonaws.com/prod/users/{userId}
+  
+  OrderServiceEndpoint:
+    Description: Order service endpoint
+    Value: !Sub https://${MicroservicesApi}.execute-api.${AWS::Region}.amazonaws.com/prod/orders/{orderId}

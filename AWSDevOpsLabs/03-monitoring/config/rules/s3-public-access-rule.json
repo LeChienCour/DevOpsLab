@@ -1,0 +1,24 @@
+{
+  "ConfigRuleName": "s3-public-access-blocked",
+  "Description": "Checks if S3 buckets have public access blocked",
+  "Source": {
+    "Owner": "CUSTOM_LAMBDA",
+    "SourceIdentifier": "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:S3PublicAccessConfigRule",
+    "SourceDetails": [
+      {
+        "EventSource": "aws.config",
+        "MessageType": "ConfigurationItemChangeNotification"
+      },
+      {
+        "EventSource": "aws.config",
+        "MessageType": "OversizedConfigurationItemChangeNotification"
+      }
+    ]
+  },
+  "Scope": {
+    "ComplianceResourceTypes": [
+      "AWS::S3::Bucket"
+    ]
+  },
+  "MaximumExecutionFrequency": "TwentyFour_Hours"
+}

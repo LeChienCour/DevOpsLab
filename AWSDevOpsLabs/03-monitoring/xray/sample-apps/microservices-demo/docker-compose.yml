@@ -1,0 +1,46 @@
+version: '3'
+
+services:
+  user-service:
+    build: ./user-service
+    ports:
+      - "5000:5000"
+    environment:
+      - AWS_REGION=us-east-1
+      - USER_TABLE_NAME=UserProfiles
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - AWS_SESSION_TOKEN=${AWS_SESSION_TOKEN}
+    networks:
+      - xray-demo
+
+  order-service:
+    build: ./order-service
+    ports:
+      - "5001:5001"
+    environment:
+      - AWS_REGION=us-east-1
+      - ORDERS_TABLE_NAME=Orders
+      - USER_SERVICE_URL=http://user-service:5000
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - AWS_SESSION_TOKEN=${AWS_SESSION_TOKEN}
+    depends_on:
+      - user-service
+    networks:
+      - xray-demo
+
+  load-generator:
+    build: ./load-generator
+    environment:
+      - USER_SERVICE_URL=http://user-service:5000
+      - ORDER_SERVICE_URL=http://order-service:5001
+    depends_on:
+      - user-service
+      - order-service
+    networks:
+      - xray-demo
+
+networks:
+  xray-demo:
+    driver: bridge

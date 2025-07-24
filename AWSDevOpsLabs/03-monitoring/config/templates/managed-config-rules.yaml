@@ -1,0 +1,152 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'AWS Config Managed Rules for Compliance Monitoring'
+
+Parameters:
+  SNSTopicARN:
+    Type: String
+    Description: SNS Topic ARN for Config notifications
+
+Resources:
+  # S3 Bucket Encryption Rule
+  S3BucketEncryptionRule:
+    Type: AWS::Config::ConfigRule
+    Properties:
+      ConfigRuleName: s3-bucket-server-side-encryption-enabled
+      Description: Checks if S3 buckets have encryption enabled
+      Source:
+        Owner: AWS
+        SourceIdentifier: S3_BUCKET_SERVER_SIDE_ENCRYPTION_ENABLED
+      Scope:
+        ComplianceResourceTypes:
+          - AWS::S3::Bucket
+      MaximumExecutionFrequency: TwentyFour_Hours
+
+  # Restricted SSH Rule
+  RestrictedSSHRule:
+    Type: AWS::Config::ConfigRule
+    Properties:
+      ConfigRuleName: restricted-ssh
+      Description: Checks if security groups allow unrestricted SSH access
+      Source:
+        Owner: AWS
+        SourceIdentifier: INCOMING_SSH_DISABLED
+      Scope:
+        ComplianceResourceTypes:
+          - AWS::EC2::SecurityGroup
+      MaximumExecutionFrequency: TwentyFour_Hours
+
+  # EBS Encryption Rule
+  EBSEncryptionRule:
+    Type: AWS::Config::ConfigRule
+    Properties:
+      ConfigRuleName: encrypted-volumes
+      Description: Checks if EBS volumes are encrypted
+      Source:
+        Owner: AWS
+        SourceIdentifier: ENCRYPTED_VOLUMES
+      Scope:
+        ComplianceResourceTypes:
+          - AWS::EC2::Volume
+      MaximumExecutionFrequency: TwentyFour_Hours
+  
+  # RDS Encryption Rule
+  RDSEncryptionRule:
+    Type: AWS::Config::ConfigRule
+    Properties:
+      ConfigRuleName: rds-storage-encrypted
+      Description: Checks if RDS instances are encrypted
+      Source:
+        Owner: AWS
+        SourceIdentifier: RDS_STORAGE_ENCRYPTED
+      Scope:
+        ComplianceResourceTypes:
+          - AWS::RDS::DBInstance
+      MaximumExecutionFrequency: TwentyFour_Hours
+  
+  # IAM Password Policy Rule
+  IAMPasswordPolicyRule:
+    Type: AWS::Config::ConfigRule
+    Properties:
+      ConfigRuleName: iam-password-policy
+      Description: Checks if IAM password policy meets security standards
+      Source:
+        Owner: AWS
+        SourceIdentifier: IAM_PASSWORD_POLICY
+      InputParameters:
+        RequireUppercaseCharacters: true
+        RequireLowercaseCharacters: true
+        RequireSymbols: true
+        RequireNumbers: true
+        MinimumPasswordLength: 14
+        PasswordReusePrevention: 24
+        MaxPasswordAge: 90
+      MaximumExecutionFrequency: TwentyFour_Hours
+
+  # S3 Bucket Remediation Configuration
+  S3BucketEncryptionRemediation:
+    Type: AWS::Config::RemediationConfiguration
+    Properties:
+      ConfigRuleName: !Ref S3BucketEncryptionRule
+      TargetId: AWS-EnableS3BucketEncryption
+      TargetType: SSM_DOCUMENT
+      TargetVersion: "1"
+      Parameters:
+        AutomationAssumeRole:
+          StaticValue:
+            Values:
+              - !Sub arn:aws:iam::${AWS::AccountId}:role/ConfigRemediationRole
+        BucketName:
+          ResourceValue:
+            Value: RESOURCE_ID
+        SSEAlgorithm:
+          StaticValue:
+            Values:
+              - AES256
+      Automatic: true
+      MaximumAutomaticAttempts: 5
+      RetryAttemptSeconds: 60
+
+  # EBS Volume Remediation Configuration
+  EBSEncryptionRemediation:
+    Type: AWS::Config::RemediationConfiguration
+    Properties:
+      ConfigRuleName: !Ref EBSEncryptionRule
+      TargetId: AWS-CreateEncryptedSnapshot
+      TargetType: SSM_DOCUMENT
+      TargetVersion: "1"
+      Parameters:
+        AutomationAssumeRole:
+          StaticValue:
+            Values:
+              - !Sub arn:aws:iam::${AWS::AccountId}:role/ConfigRemediationRole
+        VolumeId:
+          ResourceValue:
+            Value: RESOURCE_ID
+        KmsKeyId:
+          StaticValue:
+            Values:
+              - alias/aws/ebs
+      Automatic: false
+      MaximumAutomaticAttempts: 5
+      RetryAttemptSeconds: 60
+
+Outputs:
+  S3BucketEncryptionRuleArn:
+    Description: ARN of the S3 bucket encryption rule
+    Value: !GetAtt S3BucketEncryptionRule.Arn
+  
+  RestrictedSSHRuleArn:
+    Description: ARN of the restricted SSH rule
+    Value: !GetAtt RestrictedSSHRule.Arn
+  
+  EBSEncryptionRuleArn:
+    Description: ARN of the EBS encryption rule
+    Value: !GetAtt EBSEncryptionRule.Arn
+  
+  RDSEncryptionRuleArn:
+    Description: ARN of the RDS encryption rule
+    Value: !GetAtt RDSEncryptionRule.Arn
+  
+  IAMPasswordPolicyRuleArn:
+    Description: ARN of the IAM password policy rule
+    Value: !GetAtt IAMPasswordPolicyRule.Arn

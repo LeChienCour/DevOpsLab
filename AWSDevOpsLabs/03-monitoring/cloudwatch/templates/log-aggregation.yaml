@@ -1,0 +1,347 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'CloudWatch Log Aggregation Configuration for Multiple AWS Services'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: Dev
+    AllowedValues:
+      - Dev
+      - Test
+      - Prod
+    Description: Environment name for resource tagging
+  
+  RetentionDays:
+    Type: Number
+    Default: 14
+    AllowedValues: [1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365, 400, 545, 731, 1827, 3653]
+    Description: Number of days to retain logs
+  
+  CreateDashboard:
+    Type: String
+    Default: 'true'
+    AllowedValues:
+      - 'true'
+      - 'false'
+    Description: Whether to create a logs dashboard
+
+Resources:
+  # IAM Role for CloudWatch Logs
+  CloudWatchLogsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+                - apigateway.amazonaws.com
+                - ec2.amazonaws.com
+                - ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/CloudWatchLogsFullAccess
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  # Log Groups for Different Services
+  LambdaLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${Environment}"
+      RetentionInDays: !Ref RetentionDays
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  APIGatewayLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/apigateway/${Environment}"
+      RetentionInDays: !Ref RetentionDays
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  EC2LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/ec2/${Environment}"
+      RetentionInDays: !Ref RetentionDays
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  ECSLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/ecs/${Environment}"
+      RetentionInDays: !Ref RetentionDays
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  RDSLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/rds/${Environment}"
+      RetentionInDays: !Ref RetentionDays
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  # Log Metric Filters
+  ErrorMetricFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Ref LambdaLogGroup
+      FilterPattern: "ERROR"
+      MetricTransformations:
+        - MetricName: LambdaErrors
+          MetricNamespace: !Sub "LogMetrics/${Environment}"
+          MetricValue: "1"
+
+  APIGateway4xxMetricFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Ref APIGatewayLogGroup
+      FilterPattern: "{ $.status >= 400 && $.status < 500 }"
+      MetricTransformations:
+        - MetricName: API4xxErrors
+          MetricNamespace: !Sub "LogMetrics/${Environment}"
+          MetricValue: "1"
+
+  APIGateway5xxMetricFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Ref APIGatewayLogGroup
+      FilterPattern: "{ $.status >= 500 }"
+      MetricTransformations:
+        - MetricName: API5xxErrors
+          MetricNamespace: !Sub "LogMetrics/${Environment}"
+          MetricValue: "1"
+
+  # Log Subscription Filter for Centralized Logging
+  CentralizedLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/centralized/${Environment}"
+      RetentionInDays: !Ref RetentionDays
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  # Lambda Function for Log Processing
+  LogProcessorFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${Environment}-log-processor"
+      Handler: index.handler
+      Role: !GetAtt CloudWatchLogsRole.Arn
+      Runtime: nodejs14.x
+      Timeout: 60
+      MemorySize: 128
+      Environment:
+        Variables:
+          DESTINATION_LOG_GROUP: !Ref CentralizedLogGroup
+          ENVIRONMENT: !Ref Environment
+      Code:
+        ZipFile: |
+          exports.handler = async (event, context) => {
+              const zlib = require('zlib');
+              const aws = require('aws-sdk');
+              const cloudwatchlogs = new aws.CloudWatchLogs();
+              
+              // Decode and decompress the log data
+              const payload = Buffer.from(event.awslogs.data, 'base64');
+              const decompressed = zlib.gunzipSync(payload).toString('utf8');
+              const logData = JSON.parse(decompressed);
+              
+              // Process and enrich log events
+              const logEvents = logData.logEvents.map(event => {
+                  let parsedMessage;
+                  try {
+                      parsedMessage = JSON.parse(event.message);
+                  } catch (e) {
+                      parsedMessage = { rawMessage: event.message };
+                  }
+                  
+                  return {
+                      timestamp: event.timestamp,
+                      message: JSON.stringify({
+                          ...parsedMessage,
+                          sourceLogGroup: logData.logGroup,
+                          sourceLogStream: logData.logStream,
+                          environment: process.env.ENVIRONMENT,
+                          enhancedTimestamp: new Date(event.timestamp).toISOString()
+                      })
+                  };
+              });
+              
+              // Write to centralized log group
+              if (logEvents.length > 0) {
+                  const params = {
+                      logGroupName: process.env.DESTINATION_LOG_GROUP,
+                      logStreamName: `${logData.logGroup.replace(/\//g, '-')}-${Date.now()}`,
+                      logEvents: logEvents
+                  };
+                  
+                  try {
+                      // Create log stream if it doesn't exist
+                      await cloudwatchlogs.createLogStream({
+                          logGroupName: process.env.DESTINATION_LOG_GROUP,
+                          logStreamName: params.logStreamName
+                      }).promise().catch(() => {});
+                      
+                      // Put log events
+                      await cloudwatchlogs.putLogEvents(params).promise();
+                      console.log(`Successfully processed ${logEvents.length} log events`);
+                      return { status: 'success', processed: logEvents.length };
+                  } catch (error) {
+                      console.error('Error writing to centralized logs:', error);
+                      throw error;
+                  }
+              }
+              
+              return { status: 'success', processed: 0 };
+          };
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  # Permission for Lambda to be invoked by CloudWatch Logs
+  LambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref LogProcessorFunction
+      Principal: logs.amazonaws.com
+      SourceArn: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:*"
+
+  # Log Subscription Filters to send logs to the centralized processor
+  LambdaLogSubscription:
+    Type: AWS::Logs::SubscriptionFilter
+    Properties:
+      LogGroupName: !Ref LambdaLogGroup
+      FilterPattern: ""
+      DestinationArn: !GetAtt LogProcessorFunction.Arn
+
+  APIGatewayLogSubscription:
+    Type: AWS::Logs::SubscriptionFilter
+    Properties:
+      LogGroupName: !Ref APIGatewayLogGroup
+      FilterPattern: ""
+      DestinationArn: !GetAtt LogProcessorFunction.Arn
+
+  EC2LogSubscription:
+    Type: AWS::Logs::SubscriptionFilter
+    Properties:
+      LogGroupName: !Ref EC2LogGroup
+      FilterPattern: ""
+      DestinationArn: !GetAtt LogProcessorFunction.Arn
+
+  ECSLogSubscription:
+    Type: AWS::Logs::SubscriptionFilter
+    Properties:
+      LogGroupName: !Ref ECSLogGroup
+      FilterPattern: ""
+      DestinationArn: !GetAtt LogProcessorFunction.Arn
+
+  # CloudWatch Dashboard for Logs
+  LogsDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Condition: CreateDashboardCondition
+    Properties:
+      DashboardName: !Sub "${Environment}-logs-dashboard"
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "text",
+              "x": 0,
+              "y": 0,
+              "width": 24,
+              "height": 2,
+              "properties": {
+                "markdown": "# Centralized Logging Dashboard\nEnvironment: ${Environment} | Last Updated: ${'$'}{Date.now()}"
+              }
+            },
+            {
+              "type": "metric",
+              "x": 0,
+              "y": 2,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  [ "LogMetrics/${Environment}", "LambdaErrors" ],
+                  [ ".", "API4xxErrors" ],
+                  [ ".", "API5xxErrors" ]
+                ],
+                "period": 300,
+                "stat": "Sum",
+                "region": "${AWS::Region}",
+                "title": "Error Metrics"
+              }
+            },
+            {
+              "type": "log",
+              "x": 12,
+              "y": 2,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "query": "SOURCE '/aws/centralized/${Environment}' | fields @timestamp, @message\n| sort @timestamp desc\n| filter @message like /ERROR/\n| limit 20",
+                "region": "${AWS::Region}",
+                "title": "Recent Error Logs",
+                "view": "table"
+              }
+            },
+            {
+              "type": "log",
+              "x": 0,
+              "y": 8,
+              "width": 24,
+              "height": 8,
+              "properties": {
+                "query": "SOURCE '/aws/centralized/${Environment}' | stats count(*) as logCount by sourceLogGroup, bin(30m)\n| sort logCount desc",
+                "region": "${AWS::Region}",
+                "title": "Log Volume by Source",
+                "view": "table"
+              }
+            },
+            {
+              "type": "log",
+              "x": 0,
+              "y": 16,
+              "width": 24,
+              "height": 8,
+              "properties": {
+                "query": "SOURCE '/aws/centralized/${Environment}' | fields @timestamp, sourceLogGroup, environment, enhancedTimestamp\n| sort @timestamp desc\n| limit 100",
+                "region": "${AWS::Region}",
+                "title": "Recent Logs",
+                "view": "table"
+              }
+            }
+          ]
+        }
+
+Conditions:
+  CreateDashboardCondition: !Equals [!Ref CreateDashboard, 'true']
+
+Outputs:
+  CentralizedLogGroupName:
+    Description: Name of the centralized log group
+    Value: !Ref CentralizedLogGroup
+  
+  LogProcessorFunctionArn:
+    Description: ARN of the log processor Lambda function
+    Value: !GetAtt LogProcessorFunction.Arn
+  
+  LogsDashboardURL:
+    Description: URL to the Logs Dashboard (if created)
+    Condition: CreateDashboardCondition
+    Value: !Sub "https://${AWS::Region}.console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#dashboards:name=${LogsDashboard}"

@@ -1,0 +1,344 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'CloudWatch Comprehensive Monitoring Lab - Custom Metrics, Alarms, and Dashboards'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: Dev
+    AllowedValues:
+      - Dev
+      - Test
+      - Prod
+    Description: Environment name for resource tagging
+  
+  NotificationEmail:
+    Type: String
+    Description: Email address to receive alarm notifications
+    Default: example@example.com
+  
+  MetricNamespace:
+    Type: String
+    Default: CustomApp/Performance
+    Description: Namespace for custom metrics
+  
+  CPUThreshold:
+    Type: Number
+    Default: 80
+    MinValue: 1
+    MaxValue: 100
+    Description: Threshold for CPU usage alarm (percentage)
+  
+  MemoryThreshold:
+    Type: Number
+    Default: 80
+    MinValue: 1
+    MaxValue: 100
+    Description: Threshold for memory usage alarm (percentage)
+  
+  ResponseTimeThreshold:
+    Type: Number
+    Default: 400
+    Description: Threshold for response time alarm (milliseconds)
+
+Resources:
+  # SNS Topic for Alarm Notifications
+  AlarmNotificationTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      DisplayName: CloudWatch Alarms
+      TopicName: !Sub "${AWS::StackName}-alarms"
+  
+  # SNS Subscription for Email Notifications
+  EmailSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref AlarmNotificationTopic
+      Protocol: email
+      Endpoint: !Ref NotificationEmail
+  
+  # CloudWatch Log Group for Application Logs
+  ApplicationLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/${MetricNamespace}/application"
+      RetentionInDays: 14
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+  
+  # CloudWatch Log Group for System Logs
+  SystemLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/${MetricNamespace}/system"
+      RetentionInDays: 14
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+  
+  # CloudWatch Log Metric Filter for Error Counting
+  ErrorLogMetricFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Ref ApplicationLogGroup
+      FilterPattern: '{ $.level = "ERROR" }'
+      MetricTransformations:
+        - MetricName: ErrorCount
+          MetricNamespace: !Ref MetricNamespace
+          MetricValue: '1'
+          DefaultValue: 0
+  
+  # CloudWatch Log Metric Filter for Response Time
+  ResponseTimeMetricFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Ref ApplicationLogGroup
+      FilterPattern: '{ $.response_time > 0 }'
+      MetricTransformations:
+        - MetricName: LogBasedResponseTime
+          MetricNamespace: !Ref MetricNamespace
+          MetricValue: '$.response_time'
+          DefaultValue: 0
+  
+  # CloudWatch Alarm for High CPU Usage
+  HighCPUAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${AWS::StackName}-HighCPU"
+      AlarmDescription: !Sub "Alarm when CPU exceeds ${CPUThreshold}%"
+      MetricName: CPUUsage
+      Namespace: !Ref MetricNamespace
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: !Ref CPUThreshold
+      ComparisonOperator: GreaterThanThreshold
+      AlarmActions:
+        - !Ref AlarmNotificationTopic
+      OKActions:
+        - !Ref AlarmNotificationTopic
+      TreatMissingData: notBreaching
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+  
+  # CloudWatch Alarm for High Memory Usage
+  HighMemoryAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${AWS::StackName}-HighMemory"
+      AlarmDescription: !Sub "Alarm when Memory exceeds ${MemoryThreshold}%"
+      MetricName: MemoryUsage
+      Namespace: !Ref MetricNamespace
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: !Ref MemoryThreshold
+      ComparisonOperator: GreaterThanThreshold
+      AlarmActions:
+        - !Ref AlarmNotificationTopic
+      OKActions:
+        - !Ref AlarmNotificationTopic
+      TreatMissingData: notBreaching
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+  
+  # CloudWatch Alarm for High Response Time
+  HighResponseTimeAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${AWS::StackName}-HighResponseTime"
+      AlarmDescription: !Sub "Alarm when response time exceeds ${ResponseTimeThreshold}ms"
+      MetricName: ResponseTime
+      Namespace: !Ref MetricNamespace
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: !Ref ResponseTimeThreshold
+      ComparisonOperator: GreaterThanThreshold
+      AlarmActions:
+        - !Ref AlarmNotificationTopic
+      OKActions:
+        - !Ref AlarmNotificationTopic
+      TreatMissingData: notBreaching
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+  
+  # CloudWatch Alarm for Error Count
+  ErrorCountAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${AWS::StackName}-ErrorCount"
+      AlarmDescription: "Alarm when error count exceeds threshold"
+      MetricName: ErrorCount
+      Namespace: !Ref MetricNamespace
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 5
+      ComparisonOperator: GreaterThanThreshold
+      AlarmActions:
+        - !Ref AlarmNotificationTopic
+      OKActions:
+        - !Ref AlarmNotificationTopic
+      TreatMissingData: notBreaching
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+  
+  # CloudWatch Composite Alarm
+  SystemHealthCompositeAlarm:
+    Type: AWS::CloudWatch::CompositeAlarm
+    Properties:
+      AlarmName: !Sub "${AWS::StackName}-SystemHealth"
+      AlarmDescription: "Overall system health composite alarm"
+      AlarmRule: !Sub "(ALARM(${HighCPUAlarm}) OR ALARM(${HighMemoryAlarm}) OR ALARM(${HighResponseTimeAlarm}) OR ALARM(${ErrorCountAlarm}))"
+      AlarmActions:
+        - !Ref AlarmNotificationTopic
+      OKActions:
+        - !Ref AlarmNotificationTopic
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  # CloudWatch Dashboard
+  PerformanceDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub "${AWS::StackName}-Performance-Dashboard"
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "text",
+              "x": 0,
+              "y": 0,
+              "width": 24,
+              "height": 2,
+              "properties": {
+                "markdown": "# Application Performance Dashboard\nEnvironment: ${Environment} | Last Updated: ${'$'}{Date.now()}"
+              }
+            },
+            {
+              "type": "metric",
+              "x": 0,
+              "y": 2,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  [ "${MetricNamespace}", "CPUUsage" ],
+                  [ ".", "MemoryUsage" ]
+                ],
+                "period": 300,
+                "stat": "Average",
+                "region": "${AWS::Region}",
+                "title": "System Resource Usage",
+                "yAxis": {
+                  "left": {
+                    "min": 0,
+                    "max": 100
+                  }
+                }
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12,
+              "y": 2,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  [ "${MetricNamespace}", "RequestCount" ]
+                ],
+                "period": 300,
+                "stat": "Sum",
+                "region": "${AWS::Region}",
+                "title": "Request Volume"
+              }
+            },
+            {
+              "type": "metric",
+              "x": 0,
+              "y": 8,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  [ "${MetricNamespace}", "ResponseTime" ],
+                  [ ".", "LogBasedResponseTime" ]
+                ],
+                "period": 300,
+                "stat": "Average",
+                "region": "${AWS::Region}",
+                "title": "Application Response Time"
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12,
+              "y": 8,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  [ "${MetricNamespace}", "ErrorCount" ]
+                ],
+                "period": 300,
+                "stat": "Sum",
+                "region": "${AWS::Region}",
+                "title": "Error Count"
+              }
+            },
+            {
+              "type": "alarm",
+              "x": 0,
+              "y": 14,
+              "width": 24,
+              "height": 6,
+              "properties": {
+                "alarms": [
+                  "${HighCPUAlarm}",
+                  "${HighMemoryAlarm}",
+                  "${HighResponseTimeAlarm}",
+                  "${ErrorCountAlarm}",
+                  "${SystemHealthCompositeAlarm}"
+                ],
+                "title": "System Alarms"
+              }
+            },
+            {
+              "type": "log",
+              "x": 0,
+              "y": 20,
+              "width": 24,
+              "height": 6,
+              "properties": {
+                "query": "SOURCE '/aws/${MetricNamespace}/application' | fields @timestamp, @message\n| sort @timestamp desc\n| limit 20",
+                "region": "${AWS::Region}",
+                "title": "Recent Application Logs",
+                "view": "table"
+              }
+            }
+          ]
+        }
+
+Outputs:
+  DashboardURL:
+    Description: URL to the CloudWatch Dashboard
+    Value: !Sub "https://${AWS::Region}.console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#dashboards:name=${PerformanceDashboard}"
+  
+  SNSTopicARN:
+    Description: ARN of the SNS Topic for alarm notifications
+    Value: !Ref AlarmNotificationTopic
+  
+  ApplicationLogGroupName:
+    Description: Name of the Application Log Group
+    Value: !Ref ApplicationLogGroup
+  
+  SystemLogGroupName:
+    Description: Name of the System Log Group
+    Value: !Ref SystemLogGroup

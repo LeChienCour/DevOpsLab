@@ -1,0 +1,153 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'AWS Config Setup for Compliance Monitoring'
+
+Parameters:
+  ConfigBucketName:
+    Type: String
+    Description: Name of the S3 bucket where AWS Config stores configuration history
+  
+  SNSTopicARN:
+    Type: String
+    Description: SNS Topic ARN for Config notifications
+  
+  RecordingFrequency:
+    Type: String
+    Default: Six_Hours
+    AllowedValues:
+      - One_Hour
+      - Three_Hours
+      - Six_Hours
+      - Twelve_Hours
+      - TwentyFour_Hours
+    Description: Frequency at which AWS Config delivers configuration snapshots
+
+Resources:
+  # IAM Role for AWS Config
+  ConfigServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: AWSConfigRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: config.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWS_ConfigRole
+
+  # AWS Config Configuration Recorder
+  ConfigurationRecorder:
+    Type: AWS::Config::ConfigurationRecorder
+    Properties:
+      Name: default
+      RecordingGroup:
+        AllSupported: true
+        IncludeGlobalResources: true
+      RoleARN: !GetAtt ConfigServiceRole.Arn
+
+  # AWS Config Delivery Channel
+  DeliveryChannel:
+    Type: AWS::Config::DeliveryChannel
+    Properties:
+      Name: default
+      S3BucketName: !Ref ConfigBucketName
+      SnsTopicARN: !Ref SNSTopicARN
+      ConfigSnapshotDeliveryProperties:
+        DeliveryFrequency: !Ref RecordingFrequency
+
+  # Start the Configuration Recorder
+  StartConfigurationRecorder:
+    Type: AWS::CloudFormation::CustomResource
+    Properties:
+      ServiceToken: !GetAtt StartConfigurationRecorderFunction.Arn
+      ConfigurationRecorderName: default
+
+  # Lambda Function to Start Configuration Recorder
+  StartConfigurationRecorderFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.handler
+      Role: !GetAtt StartConfigurationRecorderRole.Arn
+      Runtime: python3.9
+      Timeout: 30
+      Code:
+        ZipFile: |
+          import boto3
+          import cfnresponse
+          import time
+          
+          def handler(event, context):
+              """
+              Lambda function to start AWS Config configuration recorder
+              """
+              responseData = {}
+              
+              try:
+                  # Check if this is a delete event
+                  if event['RequestType'] == 'Delete':
+                      cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData)
+                      return
+                  
+                  # Get the configuration recorder name
+                  recorder_name = event['ResourceProperties']['ConfigurationRecorderName']
+                  
+                  # Start the configuration recorder
+                  config = boto3.client('config')
+                  config.start_configuration_recorder(ConfigurationRecorderName=recorder_name)
+                  
+                  # Wait a bit to ensure it's started
+                  time.sleep(5)
+                  
+                  # Check if it's recording
+                  response = config.describe_configuration_recorder_status(
+                      ConfigurationRecorderNames=[recorder_name]
+                  )
+                  
+                  if response['ConfigurationRecordersStatus'][0]['recording']:
+                      responseData['Status'] = 'Recording'
+                  else:
+                      responseData['Status'] = 'Not Recording'
+                  
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData)
+              except Exception as e:
+                  print(f"Error: {str(e)}")
+                  cfnresponse.send(event, context, cfnresponse.FAILED, {'Error': str(e)})
+
+  # IAM Role for Lambda Function
+  StartConfigurationRecorderRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: ConfigAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - config:StartConfigurationRecorder
+                  - config:DescribeConfigurationRecorderStatus
+                Resource: '*'
+
+Outputs:
+  ConfigServiceRoleArn:
+    Description: ARN of the AWS Config Service Role
+    Value: !GetAtt ConfigServiceRole.Arn
+  
+  ConfigurationRecorderName:
+    Description: Name of the AWS Config Configuration Recorder
+    Value: !Ref ConfigurationRecorder
+  
+  DeliveryChannelName:
+    Description: Name of the AWS Config Delivery Channel
+    Value: !Ref DeliveryChannel
