@@ -1,0 +1,359 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'IAM Least-Privilege Policy Templates for DevOps Professional Certification Lab'
+
+Parameters:
+  BucketName:
+    Type: String
+    Description: Name of the S3 bucket for testing permissions
+    Default: iam-lab-test-bucket
+  
+  AccountId:
+    Type: String
+    Description: AWS Account ID for resource ARNs
+    Default: !Ref 'AWS::AccountId'
+
+Resources:
+  # Developer Role with Limited Permissions
+  DeveloperRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: DevRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+          - Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root'
+            Action: sts:AssumeRole
+            Condition:
+              Bool:
+                aws:MultiFactorAuthPresent: 'true'
+      ManagedPolicyArns:
+        - !Ref DeveloperPolicy
+
+  DeveloperPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      PolicyName: DevLimitedAccessPolicy
+      Description: Least-privilege policy for developers
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          # S3 Object-level permissions for specific bucket
+          - Sid: S3ObjectAccess
+            Effect: Allow
+            Action:
+              - s3:GetObject
+              - s3:PutObject
+              - s3:DeleteObject
+            Resource: !Sub 'arn:aws:s3:::${BucketName}-${AccountId}/*'
+          
+          # S3 Bucket-level permissions for listing
+          - Sid: S3BucketAccess
+            Effect: Allow
+            Action:
+              - s3:ListBucket
+              - s3:GetBucketLocation
+            Resource: !Sub 'arn:aws:s3:::${BucketName}-${AccountId}'
+          
+          # Limited EC2 read permissions
+          - Sid: EC2ReadAccess
+            Effect: Allow
+            Action:
+              - ec2:DescribeInstances
+              - ec2:DescribeImages
+              - ec2:DescribeSecurityGroups
+              - ec2:DescribeVpcs
+              - ec2:DescribeSubnets
+            Resource: '*'
+          
+          # CloudWatch Logs read access for debugging
+          - Sid: CloudWatchLogsRead
+            Effect: Allow
+            Action:
+              - logs:DescribeLogGroups
+              - logs:DescribeLogStreams
+              - logs:GetLogEvents
+            Resource: '*'
+          
+          # Deny dangerous actions
+          - Sid: DenyDangerousActions
+            Effect: Deny
+            Action:
+              - ec2:TerminateInstances
+              - ec2:StopInstances
+              - s3:DeleteBucket
+              - iam:*
+            Resource: '*'
+
+  # Operations Role with Elevated Permissions
+  OperationsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: OpsRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+          - Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root'
+            Action: sts:AssumeRole
+            Condition:
+              Bool:
+                aws:MultiFactorAuthPresent: 'true'
+              IpAddress:
+                aws:SourceIp: 
+                  - 10.0.0.0/8
+                  - 172.16.0.0/12
+                  - 192.168.0.0/16
+      ManagedPolicyArns:
+        - !Ref OperationsPolicy
+
+  OperationsPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      PolicyName: OpsElevatedAccessPolicy
+      Description: Elevated permissions for operations team with conditions
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          # Full S3 access to lab buckets
+          - Sid: S3FullAccess
+            Effect: Allow
+            Action: s3:*
+            Resource:
+              - !Sub 'arn:aws:s3:::${BucketName}-${AccountId}'
+              - !Sub 'arn:aws:s3:::${BucketName}-${AccountId}/*'
+          
+          # EC2 management with regional restrictions
+          - Sid: EC2Management
+            Effect: Allow
+            Action:
+              - ec2:*
+            Resource: '*'
+            Condition:
+              StringEquals:
+                ec2:Region:
+                  - us-east-1
+                  - us-west-2
+          
+          # IAM role management (limited)
+          - Sid: IAMRoleManagement
+            Effect: Allow
+            Action:
+              - iam:ListRoles
+              - iam:GetRole
+              - iam:PassRole
+            Resource: '*'
+          
+          # CloudWatch and monitoring
+          - Sid: MonitoringAccess
+            Effect: Allow
+            Action:
+              - cloudwatch:*
+              - logs:*
+              - sns:*
+            Resource: '*'
+          
+          # Time-based restrictions for sensitive operations
+          - Sid: TimeRestrictedOperations
+            Effect: Allow
+            Action:
+              - ec2:TerminateInstances
+              - ec2:StopInstances
+            Resource: '*'
+            Condition:
+              DateGreaterThan:
+                aws:CurrentTime: '08:00Z'
+              DateLessThan:
+                aws:CurrentTime: '18:00Z'
+              ForAllValues:StringEquals:
+                aws:RequestedRegion:
+                  - us-east-1
+                  - us-west-2
+
+  # Audit Role with Read-Only Access
+  AuditRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: AuditRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+          - Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root'
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Ref AuditPolicy
+        - arn:aws:iam::aws:policy/ReadOnlyAccess
+
+  AuditPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      PolicyName: AuditReadOnlyPolicy
+      Description: Read-only access for audit and compliance
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          # Enhanced read access for auditing
+          - Sid: AuditReadAccess
+            Effect: Allow
+            Action:
+              - cloudtrail:LookupEvents
+              - cloudtrail:GetTrailStatus
+              - config:GetComplianceDetailsByConfigRule
+              - config:GetComplianceDetailsByResource
+              - access-analyzer:ListFindings
+              - access-analyzer:GetFinding
+            Resource: '*'
+          
+          # Cost and billing read access
+          - Sid: BillingReadAccess
+            Effect: Allow
+            Action:
+              - ce:GetCostAndUsage
+              - ce:GetUsageReport
+              - budgets:ViewBudget
+            Resource: '*'
+
+  # Cross-Account Access Role Template
+  CrossAccountRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: CrossAccountAccessRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${TrustedAccountId}:root'
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                sts:ExternalId: !Ref ExternalId
+              Bool:
+                aws:MultiFactorAuthPresent: 'true'
+              IpAddress:
+                aws:SourceIp: !Ref TrustedSourceIPs
+      ManagedPolicyArns:
+        - !Ref CrossAccountPolicy
+
+  CrossAccountPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      PolicyName: CrossAccountLimitedAccessPolicy
+      Description: Limited access policy for cross-account scenarios
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          # Limited S3 access
+          - Sid: CrossAccountS3Access
+            Effect: Allow
+            Action:
+              - s3:GetObject
+              - s3:ListBucket
+            Resource:
+              - !Sub 'arn:aws:s3:::${BucketName}-${AccountId}'
+              - !Sub 'arn:aws:s3:::${BucketName}-${AccountId}/*'
+          
+          # Read-only EC2 access
+          - Sid: CrossAccountEC2Read
+            Effect: Allow
+            Action:
+              - ec2:Describe*
+            Resource: '*'
+
+  # Instance Profiles for EC2
+  DeveloperInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: DevInstanceProfile
+      Roles:
+        - !Ref DeveloperRole
+
+  OperationsInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: OpsInstanceProfile
+      Roles:
+        - !Ref OperationsRole
+
+  AuditInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: AuditInstanceProfile
+      Roles:
+        - !Ref AuditRole
+
+Parameters:
+  TrustedAccountId:
+    Type: String
+    Description: AWS Account ID that is trusted for cross-account access
+    Default: '123456789012'
+    
+  ExternalId:
+    Type: String
+    Description: External ID for cross-account role assumption
+    Default: 'unique-external-id-12345'
+    NoEcho: true
+    
+  TrustedSourceIPs:
+    Type: CommaDelimitedList
+    Description: List of trusted IP addresses for cross-account access
+    Default: '203.0.113.0/24,198.51.100.0/24'
+
+Outputs:
+  DeveloperRoleArn:
+    Description: ARN of the Developer Role
+    Value: !GetAtt DeveloperRole.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-DeveloperRoleArn'
+
+  OperationsRoleArn:
+    Description: ARN of the Operations Role
+    Value: !GetAtt OperationsRole.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-OperationsRoleArn'
+
+  AuditRoleArn:
+    Description: ARN of the Audit Role
+    Value: !GetAtt AuditRole.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-AuditRoleArn'
+
+  CrossAccountRoleArn:
+    Description: ARN of the Cross-Account Role
+    Value: !GetAtt CrossAccountRole.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-CrossAccountRoleArn'
+
+  DeveloperPolicyArn:
+    Description: ARN of the Developer Policy
+    Value: !Ref DeveloperPolicy
+    Export:
+      Name: !Sub '${AWS::StackName}-DeveloperPolicyArn'
+
+  OperationsPolicyArn:
+    Description: ARN of the Operations Policy
+    Value: !Ref OperationsPolicy
+    Export:
+      Name: !Sub '${AWS::StackName}-OperationsPolicyArn'
+
+  AuditPolicyArn:
+    Description: ARN of the Audit Policy
+    Value: !Ref AuditPolicy
+    Export:
+      Name: !Sub '${AWS::StackName}-AuditPolicyArn'

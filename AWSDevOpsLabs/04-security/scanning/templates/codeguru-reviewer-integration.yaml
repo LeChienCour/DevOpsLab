@@ -1,0 +1,731 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Amazon CodeGuru Reviewer Integration for Automated Code Quality and Security Analysis'
+
+Parameters:
+  RepositoryName:
+    Type: String
+    Description: Name of the CodeCommit repository for analysis
+    Default: 'security-scanning-demo'
+    
+  ApplicationName:
+    Type: String
+    Description: Name of the application
+    Default: 'scanning-lab'
+    
+  Environment:
+    Type: String
+    Description: Environment name
+    Default: 'dev'
+    AllowedValues: ['dev', 'staging', 'prod']
+    
+  NotificationEmail:
+    Type: String
+    Description: Email address for CodeGuru findings notifications
+    Default: 'admin@example.com'
+    
+  EnableAutoRemediation:
+    Type: String
+    Description: Enable automatic remediation for certain findings
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+
+Resources:
+  # CodeCommit Repository for Demo Code
+  CodeRepository:
+    Type: AWS::CodeCommit::Repository
+    Properties:
+      RepositoryName: !Ref RepositoryName
+      RepositoryDescription: Repository for CodeGuru Reviewer security scanning demo
+      Code:
+        S3:
+          Bucket: !Ref CodeArtifactsBucket
+          Key: 'sample-code.zip'
+      Tags:
+        - Key: Application
+          Value: !Ref ApplicationName
+        - Key: Environment
+          Value: !Ref Environment
+
+  # S3 Bucket for Code Artifacts and Reports
+  CodeArtifactsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${ApplicationName}-codeguru-artifacts-${AWS::AccountId}-${AWS::Region}'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteOldReports
+            Status: Enabled
+            ExpirationInDays: 90
+            Transitions:
+              - TransitionInDays: 30
+                StorageClass: STANDARD_IA
+      NotificationConfiguration:
+        CloudWatchConfigurations:
+          - Event: s3:ObjectCreated:*
+            CloudWatchConfiguration:
+              LogGroupName: !Ref CodeGuruLogGroup
+      Tags:
+        - Key: Application
+          Value: !Ref ApplicationName
+        - Key: Environment
+          Value: !Ref Environment
+
+  # CodeGuru Reviewer Association
+  CodeGuruReviewerAssociation:
+    Type: AWS::CodeGuruReviewer::RepositoryAssociation
+    Properties:
+      Repository:
+        CodeCommit:
+          Name: !GetAtt CodeRepository.Name
+      Type: CodeCommit
+      Tags:
+        - Key: Application
+          Value: !Ref ApplicationName
+        - Key: Environment
+          Value: !Ref Environment
+
+  # IAM Role for CodeBuild to run CodeGuru analysis
+  CodeBuildServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ApplicationName}-codebuild-codeguru-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CodeGuruAnalysisPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/*'
+              - Effect: Allow
+                Action:
+                  - codecommit:GitPull
+                  - codecommit:GitPush
+                  - codecommit:GetBranch
+                  - codecommit:GetCommit
+                  - codecommit:GetRepository
+                  - codecommit:ListBranches
+                  - codecommit:ListRepositories
+                Resource: !GetAtt CodeRepository.Arn
+              - Effect: Allow
+                Action:
+                  - codeguru-reviewer:DescribeRepositoryAssociation
+                  - codeguru-reviewer:ListRepositoryAssociations
+                  - codeguru-reviewer:DescribeCodeReview
+                  - codeguru-reviewer:ListCodeReviews
+                  - codeguru-reviewer:ListRecommendations
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                Resource: !Sub '${CodeArtifactsBucket}/*'
+              - Effect: Allow
+                Action:
+                  - s3:ListBucket
+                Resource: !Ref CodeArtifactsBucket
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: !Ref CodeGuruNotificationTopic
+
+  # CodeBuild Project for CodeGuru Analysis
+  CodeGuruAnalysisProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub '${ApplicationName}-codeguru-analysis'
+      Description: CodeBuild project for CodeGuru Reviewer analysis
+      ServiceRole: !GetAtt CodeBuildServiceRole.Arn
+      Artifacts:
+        Type: S3
+        Location: !Sub '${CodeArtifactsBucket}/build-artifacts'
+        Name: codeguru-analysis-artifacts
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_MEDIUM
+        Image: aws/codebuild/amazonlinux2-x86_64-standard:3.0
+        EnvironmentVariables:
+          - Name: REPOSITORY_NAME
+            Value: !Ref RepositoryName
+          - Name: APPLICATION_NAME
+            Value: !Ref ApplicationName
+          - Name: ARTIFACTS_BUCKET
+            Value: !Ref CodeArtifactsBucket
+          - Name: SNS_TOPIC_ARN
+            Value: !Ref CodeGuruNotificationTopic
+      Source:
+        Type: CODECOMMIT
+        Location: !GetAtt CodeRepository.CloneUrlHttp
+        BuildSpec: |
+          version: 0.2
+          phases:
+            install:
+              runtime-versions:
+                python: 3.8
+                nodejs: 14
+              commands:
+                - echo "Installing dependencies for CodeGuru analysis"
+                - pip install boto3 requests
+                - npm install -g eslint sonarjs
+            pre_build:
+              commands:
+                - echo "Pre-build phase - Setting up CodeGuru analysis"
+                - export CODEGURU_ASSOCIATION_ARN=$(aws codeguru-reviewer list-repository-associations --query "RepositoryAssociationSummaries[?Name=='$REPOSITORY_NAME'].AssociationArn" --output text)
+                - echo "CodeGuru Association ARN: $CODEGURU_ASSOCIATION_ARN"
+            build:
+              commands:
+                - echo "Build phase - Running CodeGuru analysis"
+                - |
+                  # Create a script to check CodeGuru recommendations
+                  cat > check_codeguru.py << 'EOF'
+                  import boto3
+                  import json
+                  import os
+                  import time
+                  from datetime import datetime, timedelta
+                  
+                  def get_codeguru_recommendations():
+                      client = boto3.client('codeguru-reviewer')
+                      s3_client = boto3.client('s3')
+                      sns_client = boto3.client('sns')
+                      
+                      repository_name = os.environ['REPOSITORY_NAME']
+                      bucket_name = os.environ['ARTIFACTS_BUCKET']
+                      sns_topic = os.environ['SNS_TOPIC_ARN']
+                      
+                      try:
+                          # List repository associations
+                          associations = client.list_repository_associations()
+                          
+                          target_association = None
+                          for assoc in associations['RepositoryAssociationSummaries']:
+                              if assoc['Name'] == repository_name:
+                                  target_association = assoc
+                                  break
+                          
+                          if not target_association:
+                              print(f"No CodeGuru association found for repository: {repository_name}")
+                              return
+                          
+                          association_arn = target_association['AssociationArn']
+                          
+                          # List code reviews for the association
+                          code_reviews = client.list_code_reviews(
+                              RepositoryAssociationArn=association_arn,
+                              MaxResults=10
+                          )
+                          
+                          all_recommendations = []
+                          
+                          for review in code_reviews['CodeReviewSummaries']:
+                              review_arn = review['CodeReviewArn']
+                              
+                              # Get recommendations for this code review
+                              recommendations = client.list_recommendations(
+                                  CodeReviewArn=review_arn,
+                                  MaxResults=100
+                              )
+                              
+                              for rec in recommendations['RecommendationSummaries']:
+                                  all_recommendations.append({
+                                      'CodeReviewArn': review_arn,
+                                      'RecommendationId': rec['RecommendationId'],
+                                      'FilePath': rec.get('FilePath', 'Unknown'),
+                                      'Description': rec.get('Description', 'No description'),
+                                      'Severity': rec.get('Severity', 'Info'),
+                                      'RuleMetadata': rec.get('RuleMetadata', {}),
+                                      'CreatedTimeStamp': rec.get('CreatedTimeStamp', datetime.now()).isoformat()
+                                  })
+                          
+                          # Generate report
+                          report = {
+                              'timestamp': datetime.now().isoformat(),
+                              'repository': repository_name,
+                              'association_arn': association_arn,
+                              'total_recommendations': len(all_recommendations),
+                              'recommendations': all_recommendations,
+                              'summary': {
+                                  'critical': len([r for r in all_recommendations if r['Severity'] == 'Critical']),
+                                  'high': len([r for r in all_recommendations if r['Severity'] == 'High']),
+                                  'medium': len([r for r in all_recommendations if r['Severity'] == 'Medium']),
+                                  'low': len([r for r in all_recommendations if r['Severity'] == 'Low']),
+                                  'info': len([r for r in all_recommendations if r['Severity'] == 'Info'])
+                              }
+                          }
+                          
+                          # Save report to S3
+                          report_key = f"codeguru-reports/{datetime.now().strftime('%Y/%m/%d')}/codeguru-analysis-{int(time.time())}.json"
+                          s3_client.put_object(
+                              Bucket=bucket_name,
+                              Key=report_key,
+                              Body=json.dumps(report, indent=2),
+                              ContentType='application/json'
+                          )
+                          
+                          print(f"CodeGuru analysis report saved to s3://{bucket_name}/{report_key}")
+                          print(f"Total recommendations: {len(all_recommendations)}")
+                          print(f"Summary: {report['summary']}")
+                          
+                          # Send notification if there are high/critical findings
+                          if report['summary']['critical'] > 0 or report['summary']['high'] > 0:
+                              message = f"""
+                              CodeGuru Reviewer Analysis Results
+                              
+                              Repository: {repository_name}
+                              Total Recommendations: {len(all_recommendations)}
+                              
+                              Severity Breakdown:
+                              - Critical: {report['summary']['critical']}
+                              - High: {report['summary']['high']}
+                              - Medium: {report['summary']['medium']}
+                              - Low: {report['summary']['low']}
+                              - Info: {report['summary']['info']}
+                              
+                              Report Location: s3://{bucket_name}/{report_key}
+                              """
+                              
+                              sns_client.publish(
+                                  TopicArn=sns_topic,
+                                  Subject='CodeGuru Reviewer - Security Findings Alert',
+                                  Message=message
+                              )
+                          
+                          return report
+                          
+                      except Exception as e:
+                          print(f"Error getting CodeGuru recommendations: {str(e)}")
+                          raise
+                  
+                  if __name__ == "__main__":
+                      get_codeguru_recommendations()
+                  EOF
+                - python check_codeguru.py
+                - |
+                  # Run additional static analysis tools
+                  echo "Running ESLint for JavaScript/TypeScript files"
+                  find . -name "*.js" -o -name "*.ts" | head -10 | xargs -r eslint --format json > eslint-report.json || true
+                  
+                  echo "Running basic security checks"
+                  # Check for common security issues
+                  grep -r "password\|secret\|key" --include="*.js" --include="*.py" --include="*.java" . > security-patterns.txt || true
+                  
+                  # Upload additional reports
+                  aws s3 cp eslint-report.json s3://$ARTIFACTS_BUCKET/reports/eslint-report.json || true
+                  aws s3 cp security-patterns.txt s3://$ARTIFACTS_BUCKET/reports/security-patterns.txt || true
+            post_build:
+              commands:
+                - echo "Post-build phase - Analysis complete"
+                - echo "CodeGuru Reviewer analysis completed successfully"
+      Tags:
+        - Key: Application
+          Value: !Ref ApplicationName
+        - Key: Environment
+          Value: !Ref Environment
+
+  # Lambda Function for Processing CodeGuru Findings
+  CodeGuruProcessorFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${ApplicationName}-codeguru-processor'
+      Runtime: python3.9
+      Handler: index.lambda_handler
+      Role: !GetAtt CodeGuruProcessorRole.Arn
+      Timeout: 300
+      Environment:
+        Variables:
+          SNS_TOPIC_ARN: !Ref CodeGuruNotificationTopic
+          S3_BUCKET: !Ref CodeArtifactsBucket
+          ENABLE_AUTO_REMEDIATION: !Ref EnableAutoRemediation
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+          import logging
+          from datetime import datetime
+          
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+          
+          def lambda_handler(event, context):
+              """Process CodeGuru Reviewer findings and take actions"""
+              
+              codeguru_client = boto3.client('codeguru-reviewer')
+              sns_client = boto3.client('sns')
+              s3_client = boto3.client('s3')
+              
+              sns_topic = os.environ['SNS_TOPIC_ARN']
+              s3_bucket = os.environ['S3_BUCKET']
+              auto_remediation = os.environ.get('ENABLE_AUTO_REMEDIATION', 'false').lower() == 'true'
+              
+              try:
+                  # Process the event (could be from EventBridge, S3, or direct invocation)
+                  logger.info(f"Processing CodeGuru event: {json.dumps(event)}")
+                  
+                  # If this is an S3 event, process the uploaded report
+                  if 'Records' in event and event['Records'][0]['eventSource'] == 'aws:s3':
+                      for record in event['Records']:
+                          bucket = record['s3']['bucket']['name']
+                          key = record['s3']['object']['key']
+                          
+                          if 'codeguru-reports' in key:
+                              process_codeguru_report(s3_client, sns_client, bucket, key, auto_remediation)
+                  
+                  # If this is a direct invocation, get latest findings
+                  else:
+                      get_latest_findings(codeguru_client, sns_client, s3_client, s3_bucket, auto_remediation)
+                  
+                  return {
+                      'statusCode': 200,
+                      'body': json.dumps('CodeGuru findings processed successfully')
+                  }
+                  
+              except Exception as e:
+                  logger.error(f"Error processing CodeGuru findings: {str(e)}")
+                  return {
+                      'statusCode': 500,
+                      'body': json.dumps(f'Error: {str(e)}')
+                  }
+          
+          def process_codeguru_report(s3_client, sns_client, bucket, key, auto_remediation):
+              """Process a CodeGuru report from S3"""
+              try:
+                  # Get the report from S3
+                  response = s3_client.get_object(Bucket=bucket, Key=key)
+                  report = json.loads(response['Body'].read())
+                  
+                  logger.info(f"Processing report with {report['total_recommendations']} recommendations")
+                  
+                  # Analyze findings and take actions
+                  critical_findings = [r for r in report['recommendations'] if r['Severity'] == 'Critical']
+                  high_findings = [r for r in report['recommendations'] if r['Severity'] == 'High']
+                  
+                  if critical_findings or high_findings:
+                      # Send detailed notification
+                      send_detailed_notification(sns_client, os.environ['SNS_TOPIC_ARN'], report, critical_findings, high_findings)
+                      
+                      # Perform auto-remediation if enabled
+                      if auto_remediation:
+                          perform_auto_remediation(critical_findings + high_findings)
+                  
+              except Exception as e:
+                  logger.error(f"Error processing CodeGuru report: {str(e)}")
+                  raise
+          
+          def get_latest_findings(codeguru_client, sns_client, s3_client, bucket, auto_remediation):
+              """Get latest CodeGuru findings directly from API"""
+              try:
+                  # List repository associations
+                  associations = codeguru_client.list_repository_associations()
+                  
+                  for assoc in associations['RepositoryAssociationSummaries']:
+                      association_arn = assoc['AssociationArn']
+                      
+                      # Get recent code reviews
+                      code_reviews = codeguru_client.list_code_reviews(
+                          RepositoryAssociationArn=association_arn,
+                          MaxResults=5
+                      )
+                      
+                      for review in code_reviews['CodeReviewSummaries']:
+                          review_arn = review['CodeReviewArn']
+                          
+                          # Get recommendations
+                          recommendations = codeguru_client.list_recommendations(
+                              CodeReviewArn=review_arn,
+                              MaxResults=50
+                          )
+                          
+                          if recommendations['RecommendationSummaries']:
+                              logger.info(f"Found {len(recommendations['RecommendationSummaries'])} recommendations")
+                              
+                              # Process recommendations
+                              critical_findings = [r for r in recommendations['RecommendationSummaries'] if r.get('Severity') == 'Critical']
+                              high_findings = [r for r in recommendations['RecommendationSummaries'] if r.get('Severity') == 'High']
+                              
+                              if critical_findings or high_findings:
+                                  report = {
+                                      'repository': assoc['Name'],
+                                      'total_recommendations': len(recommendations['RecommendationSummaries']),
+                                      'recommendations': recommendations['RecommendationSummaries']
+                                  }
+                                  send_detailed_notification(sns_client, os.environ['SNS_TOPIC_ARN'], report, critical_findings, high_findings)
+                  
+              except Exception as e:
+                  logger.error(f"Error getting latest findings: {str(e)}")
+                  raise
+          
+          def send_detailed_notification(sns_client, topic_arn, report, critical_findings, high_findings):
+              """Send detailed notification about findings"""
+              try:
+                  message = f"""
+                  CodeGuru Reviewer Security Alert
+                  
+                  Repository: {report.get('repository', 'Unknown')}
+                  Total Recommendations: {report['total_recommendations']}
+                  
+                  Critical Findings ({len(critical_findings)}):
+                  """
+                  
+                  for finding in critical_findings[:5]:  # Limit to first 5
+                      message += f"- {finding.get('FilePath', 'Unknown')}: {finding.get('Description', 'No description')}\n"
+                  
+                  message += f"\nHigh Findings ({len(high_findings)}):\n"
+                  for finding in high_findings[:5]:  # Limit to first 5
+                      message += f"- {finding.get('FilePath', 'Unknown')}: {finding.get('Description', 'No description')}\n"
+                  
+                  message += "\nPlease review these findings and take appropriate action."
+                  
+                  sns_client.publish(
+                      TopicArn=topic_arn,
+                      Subject='CodeGuru Reviewer - Critical Security Findings',
+                      Message=message
+                  )
+                  
+                  logger.info("Detailed notification sent successfully")
+                  
+              except Exception as e:
+                  logger.error(f"Error sending notification: {str(e)}")
+          
+          def perform_auto_remediation(findings):
+              """Perform automatic remediation for certain types of findings"""
+              try:
+                  logger.info(f"Auto-remediation enabled, processing {len(findings)} findings")
+                  
+                  # This is a simplified example - in practice, you would implement
+                  # specific remediation logic based on finding types
+                  for finding in findings:
+                      rule_metadata = finding.get('RuleMetadata', {})
+                      rule_id = rule_metadata.get('RuleId', '')
+                      
+                      logger.info(f"Processing finding with rule ID: {rule_id}")
+                      
+                      # Example: Auto-fix certain types of issues
+                      if 'hardcoded-credentials' in rule_id.lower():
+                          logger.info("Found hardcoded credentials - would create remediation ticket")
+                          # In practice: create JIRA ticket, send to security team, etc.
+                      
+                      elif 'sql-injection' in rule_id.lower():
+                          logger.info("Found SQL injection risk - would block deployment")
+                          # In practice: fail the build, block deployment, etc.
+                      
+                      elif 'xss' in rule_id.lower():
+                          logger.info("Found XSS vulnerability - would create security alert")
+                          # In practice: create security incident, notify team, etc.
+                  
+              except Exception as e:
+                  logger.error(f"Error in auto-remediation: {str(e)}")
+
+  # IAM Role for CodeGuru Processor Lambda
+  CodeGuruProcessorRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ApplicationName}-codeguru-processor-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: CodeGuruProcessorPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - codeguru-reviewer:DescribeRepositoryAssociation
+                  - codeguru-reviewer:ListRepositoryAssociations
+                  - codeguru-reviewer:DescribeCodeReview
+                  - codeguru-reviewer:ListCodeReviews
+                  - codeguru-reviewer:ListRecommendations
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                Resource: !Sub '${CodeArtifactsBucket}/*'
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: !Ref CodeGuruNotificationTopic
+
+  # SNS Topic for Notifications
+  CodeGuruNotificationTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub '${ApplicationName}-codeguru-notifications'
+      DisplayName: CodeGuru Reviewer Notifications
+
+  CodeGuruNotificationSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      Protocol: email
+      TopicArn: !Ref CodeGuruNotificationTopic
+      Endpoint: !Ref NotificationEmail
+
+  # CloudWatch Log Group
+  CodeGuruLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/codeguru/${ApplicationName}'
+      RetentionInDays: 14
+
+  # EventBridge Rule for CodeGuru Events
+  CodeGuruEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub '${ApplicationName}-codeguru-events'
+      Description: Capture CodeGuru Reviewer events
+      EventPattern:
+        source:
+          - aws.codeguru-reviewer
+        detail-type:
+          - CodeGuru Reviewer Code Review State Change
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt CodeGuruProcessorFunction.Arn
+          Id: CodeGuruProcessorTarget
+
+  # Permission for EventBridge to invoke Lambda
+  CodeGuruEventPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref CodeGuruProcessorFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt CodeGuruEventRule.Arn
+
+  # CloudWatch Dashboard
+  CodeGuruDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub '${ApplicationName}-codeguru-security'
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "metric",
+              "x": 0,
+              "y": 0,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  [ "AWS/CodeBuild", "Builds", "ProjectName", "${CodeGuruAnalysisProject}" ],
+                  [ ".", "SucceededBuilds", ".", "." ],
+                  [ ".", "FailedBuilds", ".", "." ]
+                ],
+                "period": 300,
+                "stat": "Sum",
+                "region": "${AWS::Region}",
+                "title": "CodeGuru Analysis Builds"
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12,
+              "y": 0,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  [ "AWS/Lambda", "Invocations", "FunctionName", "${CodeGuruProcessorFunction}" ],
+                  [ ".", "Errors", ".", "." ],
+                  [ ".", "Duration", ".", "." ]
+                ],
+                "period": 300,
+                "stat": "Sum",
+                "region": "${AWS::Region}",
+                "title": "CodeGuru Processor Function"
+              }
+            }
+          ]
+        }
+
+Outputs:
+  CodeRepositoryCloneUrl:
+    Description: Clone URL for the CodeCommit repository
+    Value: !GetAtt CodeRepository.CloneUrlHttp
+    Export:
+      Name: !Sub '${AWS::StackName}-CodeRepositoryCloneUrl'
+
+  CodeGuruAssociationArn:
+    Description: ARN of the CodeGuru Reviewer association
+    Value: !Ref CodeGuruReviewerAssociation
+    Export:
+      Name: !Sub '${AWS::StackName}-CodeGuruAssociationArn'
+
+  CodeBuildProjectName:
+    Description: Name of the CodeBuild project for CodeGuru analysis
+    Value: !Ref CodeGuruAnalysisProject
+    Export:
+      Name: !Sub '${AWS::StackName}-CodeBuildProjectName'
+
+  ProcessorFunctionArn:
+    Description: ARN of the CodeGuru processor Lambda function
+    Value: !GetAtt CodeGuruProcessorFunction.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-ProcessorFunctionArn'
+
+  ArtifactsBucketName:
+    Description: Name of the S3 bucket for artifacts and reports
+    Value: !Ref CodeArtifactsBucket
+    Export:
+      Name: !Sub '${AWS::StackName}-ArtifactsBucketName'
+
+  NotificationTopicArn:
+    Description: ARN of the SNS topic for notifications
+    Value: !Ref CodeGuruNotificationTopic
+    Export:
+      Name: !Sub '${AWS::StackName}-NotificationTopicArn'
+
+  DashboardURL:
+    Description: URL to the CloudWatch Dashboard
+    Value: !Sub 'https://${AWS::Region}.console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#dashboards:name=${CodeGuruDashboard}'
+
+  UsageInstructions:
+    Description: Instructions for using the CodeGuru integration
+    Value: !Sub |
+      1. Clone the repository: git clone ${CodeRepository.CloneUrlHttp}
+      2. Push code changes to trigger CodeGuru analysis
+      3. Start CodeBuild project: aws codebuild start-build --project-name ${CodeGuruAnalysisProject}
+      4. View results in S3: aws s3 ls s3://${CodeArtifactsBucket}/codeguru-reports/
+      5. Monitor dashboard: https://${AWS::Region}.console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#dashboards:name=${CodeGuruDashboard}
+
+  SecurityBestPractices:
+    Description: Security best practices implemented
+    Value: |
+      ✓ Automated code quality and security analysis
+      ✓ Integration with CI/CD pipeline
+      ✓ Real-time notifications for critical findings
+      ✓ Automated report generation and storage
+      ✓ Security findings categorization by severity
+      ✓ EventBridge integration for event-driven processing
+      ✓ CloudWatch monitoring and alerting
+      ✓ S3 lifecycle policies for cost optimization
+      ✓ IAM least-privilege access controls
+      ✓ Optional auto-remediation capabilities

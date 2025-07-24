@@ -1,0 +1,488 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'IAM Access Analyzer Integration for Policy Validation and External Access Detection'
+
+Parameters:
+  AnalyzerName:
+    Type: String
+    Description: Name for the IAM Access Analyzer
+    Default: 'DevOps-Lab-Analyzer'
+    
+  NotificationEmail:
+    Type: String
+    Description: Email address for Access Analyzer findings notifications
+    Default: 'admin@example.com'
+    
+  OrganizationId:
+    Type: String
+    Description: AWS Organization ID (leave empty if not using Organizations)
+    Default: ''
+    
+  EnableArchiveRules:
+    Type: String
+    Description: Enable automatic archive rules for expected findings
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+
+Conditions:
+  HasOrganization: !Not [!Equals [!Ref OrganizationId, '']]
+  EnableArchiving: !Equals [!Ref EnableArchiveRules, 'true']
+
+Resources:
+  # IAM Access Analyzer
+  AccessAnalyzer:
+    Type: AWS::AccessAnalyzer::Analyzer
+    Properties:
+      AnalyzerName: !Ref AnalyzerName
+      Type: !If [HasOrganization, 'ORGANIZATION', 'ACCOUNT']
+      ArchiveRules:
+        - !If
+          - EnableArchiving
+          - RuleName: ArchiveExpectedCrossAccountAccess
+            Filter:
+              - Property: 'resource'
+                Contains: 
+                  - 'cross-account'
+                  - 'shared'
+              - Property: 'principal'
+                Contains:
+                  - !If [HasOrganization, !Ref OrganizationId, !Ref 'AWS::AccountId']
+          - !Ref 'AWS::NoValue'
+        - !If
+          - EnableArchiving
+          - RuleName: ArchiveServiceLinkedRoles
+            Filter:
+              - Property: 'resourceType'
+                Eq: 'AWS::IAM::Role'
+              - Property: 'resource'
+                Contains: 
+                  - 'service-linked'
+                  - 'aws-service-role'
+          - !Ref 'AWS::NoValue'
+      Tags:
+        - Key: Purpose
+          Value: SecurityCompliance
+        - Key: Environment
+          Value: Lab
+
+  # Lambda function for processing Access Analyzer findings
+  AccessAnalyzerProcessor:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: AccessAnalyzer-Findings-Processor
+      Runtime: python3.9
+      Handler: index.lambda_handler
+      Role: !GetAtt AccessAnalyzerProcessorRole.Arn
+      Timeout: 300
+      Environment:
+        Variables:
+          ANALYZER_ARN: !GetAtt AccessAnalyzer.Arn
+          SNS_TOPIC_ARN: !Ref FindingsNotificationTopic
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+          from datetime import datetime, timedelta
+          
+          def lambda_handler(event, context):
+              analyzer_client = boto3.client('accessanalyzer')
+              sns_client = boto3.client('sns')
+              
+              analyzer_arn = os.environ['ANALYZER_ARN']
+              sns_topic_arn = os.environ['SNS_TOPIC_ARN']
+              
+              try:
+                  # Get all active findings
+                  response = analyzer_client.list_findings(
+                      analyzerArn=analyzer_arn,
+                      filter={
+                          'status': {
+                              'eq': ['ACTIVE']
+                          }
+                      }
+                  )
+                  
+                  findings = response.get('findings', [])
+                  
+                  # Categorize findings by severity
+                  critical_findings = []
+                  high_findings = []
+                  medium_findings = []
+                  
+                  for finding in findings:
+                      # Determine severity based on resource type and principal
+                      severity = determine_severity(finding)
+                      
+                      if severity == 'CRITICAL':
+                          critical_findings.append(finding)
+                      elif severity == 'HIGH':
+                          high_findings.append(finding)
+                      else:
+                          medium_findings.append(finding)
+                  
+                  # Send notifications for critical and high findings
+                  if critical_findings or high_findings:
+                      message = format_notification_message(critical_findings, high_findings, medium_findings)
+                      
+                      sns_client.publish(
+                          TopicArn=sns_topic_arn,
+                          Subject='IAM Access Analyzer - Security Findings Alert',
+                          Message=message
+                      )
+                  
+                  # Return summary
+                  return {
+                      'statusCode': 200,
+                      'body': json.dumps({
+                          'total_findings': len(findings),
+                          'critical': len(critical_findings),
+                          'high': len(high_findings),
+                          'medium': len(medium_findings)
+                      })
+                  }
+                  
+              except Exception as e:
+                  print(f"Error processing findings: {str(e)}")
+                  return {
+                      'statusCode': 500,
+                      'body': json.dumps({'error': str(e)})
+                  }
+          
+          def determine_severity(finding):
+              """Determine finding severity based on resource and principal"""
+              resource_type = finding.get('resourceType', '')
+              principal = finding.get('principal', {})
+              condition = finding.get('condition', {})
+              
+              # Critical: External access to sensitive resources
+              if 'AWS' in principal and 'root' in str(principal):
+                  return 'CRITICAL'
+              
+              # Critical: Public access to IAM roles or S3 buckets
+              if '*' in str(principal) and resource_type in ['AWS::IAM::Role', 'AWS::S3::Bucket']:
+                  return 'CRITICAL'
+              
+              # High: Cross-account access without conditions
+              if 'AWS' in principal and not condition:
+                  return 'HIGH'
+              
+              # High: Service access without proper conditions
+              if 'Service' in principal and resource_type == 'AWS::IAM::Role':
+                  return 'HIGH'
+              
+              return 'MEDIUM'
+          
+          def format_notification_message(critical, high, medium):
+              """Format notification message for findings"""
+              message = "IAM Access Analyzer Findings Summary\n"
+              message += "=" * 50 + "\n\n"
+              
+              if critical:
+                  message += f"🚨 CRITICAL FINDINGS ({len(critical)}):\n"
+                  for finding in critical[:5]:  # Limit to first 5
+                      message += f"- {finding.get('resourceType', 'Unknown')}: {finding.get('resource', 'Unknown')}\n"
+                      message += f"  Principal: {finding.get('principal', {})}\n"
+                      message += f"  Action: {finding.get('action', [])}\n\n"
+              
+              if high:
+                  message += f"⚠️  HIGH FINDINGS ({len(high)}):\n"
+                  for finding in high[:3]:  # Limit to first 3
+                      message += f"- {finding.get('resourceType', 'Unknown')}: {finding.get('resource', 'Unknown')}\n"
+                      message += f"  Principal: {finding.get('principal', {})}\n\n"
+              
+              if medium:
+                  message += f"ℹ️  MEDIUM FINDINGS: {len(medium)}\n\n"
+              
+              message += "Please review these findings in the AWS Console:\n"
+              message += "https://console.aws.amazon.com/access-analyzer/home\n"
+              
+              return message
+
+  AccessAnalyzerProcessorRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: AccessAnalyzer-Processor-Role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: AccessAnalyzerAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - access-analyzer:ListFindings
+                  - access-analyzer:GetFinding
+                  - access-analyzer:ListAnalyzers
+                Resource: !GetAtt AccessAnalyzer.Arn
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: !Ref FindingsNotificationTopic
+
+  # EventBridge rule to trigger processing on new findings
+  AccessAnalyzerEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: AccessAnalyzer-Findings-Rule
+      Description: Trigger processing when Access Analyzer creates new findings
+      EventPattern:
+        source:
+          - aws.access-analyzer
+        detail-type:
+          - Access Analyzer Finding
+        detail:
+          status:
+            - ACTIVE
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt AccessAnalyzerProcessor.Arn
+          Id: AccessAnalyzerProcessorTarget
+
+  # Permission for EventBridge to invoke Lambda
+  AccessAnalyzerEventPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref AccessAnalyzerProcessor
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt AccessAnalyzerEventRule.Arn
+
+  # SNS Topic for notifications
+  FindingsNotificationTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: AccessAnalyzer-Findings-Notifications
+      DisplayName: IAM Access Analyzer Findings
+
+  FindingsNotificationSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      Protocol: email
+      TopicArn: !Ref FindingsNotificationTopic
+      Endpoint: !Ref NotificationEmail
+
+  # CloudWatch Dashboard for Access Analyzer metrics
+  AccessAnalyzerDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: IAM-Access-Analyzer-Dashboard
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "metric",
+              "x": 0,
+              "y": 0,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  [ "AWS/AccessAnalyzer", "FindingsCount", "AnalyzerName", "${AnalyzerName}" ]
+                ],
+                "period": 300,
+                "stat": "Sum",
+                "region": "${AWS::Region}",
+                "title": "Access Analyzer Findings Count"
+              }
+            },
+            {
+              "type": "log",
+              "x": 0,
+              "y": 6,
+              "width": 24,
+              "height": 6,
+              "properties": {
+                "query": "SOURCE '/aws/lambda/AccessAnalyzer-Findings-Processor'\n| fields @timestamp, @message\n| filter @message like /ERROR/\n| sort @timestamp desc\n| limit 20",
+                "region": "${AWS::Region}",
+                "title": "Access Analyzer Processor Errors"
+              }
+            }
+          ]
+        }
+
+  # Custom resource to create initial policy validation
+  PolicyValidationCustomResource:
+    Type: AWS::CloudFormation::CustomResource
+    Properties:
+      ServiceToken: !GetAtt PolicyValidationFunction.Arn
+      AnalyzerArn: !GetAtt AccessAnalyzer.Arn
+
+  PolicyValidationFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: AccessAnalyzer-Policy-Validator
+      Runtime: python3.9
+      Handler: index.lambda_handler
+      Role: !GetAtt PolicyValidationRole.Arn
+      Timeout: 300
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import cfnresponse
+          
+          def lambda_handler(event, context):
+              try:
+                  if event['RequestType'] == 'Create':
+                      analyzer_client = boto3.client('accessanalyzer')
+                      
+                      # Example policy validation
+                      test_policy = {
+                          "Version": "2012-10-17",
+                          "Statement": [
+                              {
+                                  "Effect": "Allow",
+                                  "Action": "s3:GetObject",
+                                  "Resource": "*"
+                              }
+                          ]
+                      }
+                      
+                      # Validate the policy
+                      response = analyzer_client.validate_policy(
+                          policyDocument=json.dumps(test_policy),
+                          policyType='IDENTITY_POLICY'
+                      )
+                      
+                      findings = response.get('findings', [])
+                      
+                      cfnresponse.send(event, context, cfnresponse.SUCCESS, {
+                          'ValidationFindings': len(findings),
+                          'Message': f'Policy validation completed with {len(findings)} findings'
+                      })
+                  else:
+                      cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+                      
+              except Exception as e:
+                  print(f"Error: {str(e)}")
+                  cfnresponse.send(event, context, cfnresponse.FAILED, {
+                      'Error': str(e)
+                  })
+
+  PolicyValidationRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: PolicyValidationAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - access-analyzer:ValidatePolicy
+                Resource: '*'
+
+  # CloudWatch Alarms for monitoring
+  HighSeverityFindingsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: AccessAnalyzer-High-Severity-Findings
+      AlarmDescription: Alert when high severity findings are detected
+      MetricName: FindingsCount
+      Namespace: AWS/AccessAnalyzer
+      Dimensions:
+        - Name: AnalyzerName
+          Value: !Ref AnalyzerName
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      AlarmActions:
+        - !Ref FindingsNotificationTopic
+
+  # IAM role for automated remediation (example)
+  AutoRemediationRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: AccessAnalyzer-Auto-Remediation-Role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: RemediationAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - iam:GetRole
+                  - iam:GetRolePolicy
+                  - iam:ListAttachedRolePolicies
+                  - iam:DetachRolePolicy
+                  - iam:PutRolePolicy
+                  - s3:GetBucketPolicy
+                  - s3:PutBucketPolicy
+                  - access-analyzer:GetFinding
+                  - access-analyzer:UpdateFindings
+                Resource: '*'
+              - Effect: Deny
+                Action:
+                  - iam:DeleteRole
+                  - iam:DeleteRolePolicy
+                  - s3:DeleteBucket
+                Resource: '*'
+
+Outputs:
+  AccessAnalyzerArn:
+    Description: ARN of the IAM Access Analyzer
+    Value: !GetAtt AccessAnalyzer.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-AccessAnalyzerArn'
+
+  AccessAnalyzerName:
+    Description: Name of the IAM Access Analyzer
+    Value: !Ref AccessAnalyzer
+    Export:
+      Name: !Sub '${AWS::StackName}-AccessAnalyzerName'
+
+  FindingsProcessorFunctionArn:
+    Description: ARN of the findings processor Lambda function
+    Value: !GetAtt AccessAnalyzerProcessor.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-FindingsProcessorArn'
+
+  NotificationTopicArn:
+    Description: ARN of the SNS topic for findings notifications
+    Value: !Ref FindingsNotificationTopic
+    Export:
+      Name: !Sub '${AWS::StackName}-NotificationTopicArn'
+
+  DashboardURL:
+    Description: URL to the CloudWatch Dashboard
+    Value: !Sub 'https://${AWS::Region}.console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#dashboards:name=${AccessAnalyzerDashboard}'
+
+  AccessAnalyzerConsoleURL:
+    Description: URL to the Access Analyzer console
+    Value: !Sub 'https://${AWS::Region}.console.aws.amazon.com/access-analyzer/home?region=${AWS::Region}#/analyzer/${AccessAnalyzer}'
+
+  UsageInstructions:
+    Description: Instructions for using the Access Analyzer integration
+    Value: !Sub |
+      1. View findings: https://${AWS::Region}.console.aws.amazon.com/access-analyzer/home?region=${AWS::Region}#/analyzer/${AccessAnalyzer}
+      2. Monitor dashboard: https://${AWS::Region}.console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#dashboards:name=${AccessAnalyzerDashboard}
+      3. Validate policies using CLI: aws accessanalyzer validate-policy --policy-document file://policy.json --policy-type IDENTITY_POLICY
+      4. Check notifications in SNS topic: ${FindingsNotificationTopic}

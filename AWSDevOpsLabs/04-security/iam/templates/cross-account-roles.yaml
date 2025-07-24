@@ -1,0 +1,474 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Cross-Account IAM Role Templates with Trust Policies and Security Controls'
+
+Parameters:
+  TrustedAccountId:
+    Type: String
+    Description: AWS Account ID that will assume roles in this account
+    AllowedPattern: '[0-9]{12}'
+    ConstraintDescription: Must be a valid 12-digit AWS Account ID
+    
+  ExternalId:
+    Type: String
+    Description: External ID for additional security (recommended for third-party access)
+    MinLength: 8
+    MaxLength: 1224
+    NoEcho: true
+    Default: 'change-me-external-id-12345'
+    
+  RequireMFA:
+    Type: String
+    Description: Require Multi-Factor Authentication for role assumption
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+    
+  TrustedSourceIPs:
+    Type: CommaDelimitedList
+    Description: List of trusted IP CIDR blocks (optional)
+    Default: '0.0.0.0/0'
+    
+  SessionDuration:
+    Type: Number
+    Description: Maximum session duration in seconds (1 hour to 12 hours)
+    Default: 3600
+    MinValue: 3600
+    MaxValue: 43200
+
+Conditions:
+  RequireMFACondition: !Equals [!Ref RequireMFA, 'true']
+  HasTrustedIPs: !Not [!Equals [!Select [0, !Ref TrustedSourceIPs], '0.0.0.0/0']]
+
+Resources:
+  # Cross-Account Read-Only Role
+  CrossAccountReadOnlyRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: CrossAccount-ReadOnly-Role
+      Description: Cross-account role with read-only permissions
+      MaxSessionDuration: !Ref SessionDuration
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: CrossAccountAssumeRole
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${TrustedAccountId}:root'
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                sts:ExternalId: !Ref ExternalId
+              Bool:
+                aws:MultiFactorAuthPresent: !If [RequireMFACondition, 'true', !Ref 'AWS::NoValue']
+              IpAddress:
+                aws:SourceIp: !If [HasTrustedIPs, !Ref TrustedSourceIPs, !Ref 'AWS::NoValue']
+              StringLike:
+                aws:userid: !Sub '${TrustedAccountId}:*'
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/ReadOnlyAccess
+      Tags:
+        - Key: Purpose
+          Value: CrossAccountAccess
+        - Key: AccessLevel
+          Value: ReadOnly
+
+  # Cross-Account Developer Role
+  CrossAccountDeveloperRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: CrossAccount-Developer-Role
+      Description: Cross-account role with developer permissions
+      MaxSessionDuration: !Ref SessionDuration
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: CrossAccountDeveloperAssumeRole
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${TrustedAccountId}:root'
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                sts:ExternalId: !Ref ExternalId
+              Bool:
+                aws:MultiFactorAuthPresent: !If [RequireMFACondition, 'true', !Ref 'AWS::NoValue']
+              IpAddress:
+                aws:SourceIp: !If [HasTrustedIPs, !Ref TrustedSourceIPs, !Ref 'AWS::NoValue']
+              StringLike:
+                aws:userid: !Sub '${TrustedAccountId}:*'
+              DateGreaterThan:
+                aws:CurrentTime: '2024-01-01T00:00:00Z'
+      ManagedPolicyArns:
+        - !Ref CrossAccountDeveloperPolicy
+      Tags:
+        - Key: Purpose
+          Value: CrossAccountAccess
+        - Key: AccessLevel
+          Value: Developer
+
+  CrossAccountDeveloperPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      PolicyName: CrossAccount-Developer-Policy
+      Description: Developer permissions for cross-account access
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          # S3 Development Access
+          - Sid: S3DevelopmentAccess
+            Effect: Allow
+            Action:
+              - s3:GetObject
+              - s3:PutObject
+              - s3:DeleteObject
+              - s3:ListBucket
+            Resource:
+              - 'arn:aws:s3:::dev-*'
+              - 'arn:aws:s3:::dev-*/*'
+              - 'arn:aws:s3:::test-*'
+              - 'arn:aws:s3:::test-*/*'
+          
+          # EC2 Development Access
+          - Sid: EC2DevelopmentAccess
+            Effect: Allow
+            Action:
+              - ec2:DescribeInstances
+              - ec2:DescribeImages
+              - ec2:DescribeSecurityGroups
+              - ec2:DescribeVpcs
+              - ec2:DescribeSubnets
+              - ec2:RunInstances
+              - ec2:StopInstances
+              - ec2:StartInstances
+            Resource: '*'
+            Condition:
+              StringEquals:
+                ec2:InstanceType:
+                  - t3.micro
+                  - t3.small
+                  - t2.micro
+                  - t2.small
+          
+          # Lambda Development Access
+          - Sid: LambdaDevelopmentAccess
+            Effect: Allow
+            Action:
+              - lambda:GetFunction
+              - lambda:ListFunctions
+              - lambda:InvokeFunction
+              - lambda:CreateFunction
+              - lambda:UpdateFunctionCode
+              - lambda:UpdateFunctionConfiguration
+            Resource: 
+              - !Sub 'arn:aws:lambda:*:${AWS::AccountId}:function:dev-*'
+              - !Sub 'arn:aws:lambda:*:${AWS::AccountId}:function:test-*'
+          
+          # CloudWatch Logs Access
+          - Sid: CloudWatchLogsAccess
+            Effect: Allow
+            Action:
+              - logs:CreateLogGroup
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+              - logs:DescribeLogGroups
+              - logs:DescribeLogStreams
+              - logs:GetLogEvents
+            Resource: '*'
+          
+          # Deny Production Resources
+          - Sid: DenyProductionAccess
+            Effect: Deny
+            Action: '*'
+            Resource:
+              - 'arn:aws:s3:::prod-*'
+              - 'arn:aws:s3:::prod-*/*'
+              - !Sub 'arn:aws:lambda:*:${AWS::AccountId}:function:prod-*'
+            
+          # Deny Dangerous Actions
+          - Sid: DenyDangerousActions
+            Effect: Deny
+            Action:
+              - ec2:TerminateInstances
+              - iam:*
+              - organizations:*
+              - account:*
+            Resource: '*'
+
+  # Cross-Account Operations Role
+  CrossAccountOperationsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: CrossAccount-Operations-Role
+      Description: Cross-account role with operations permissions
+      MaxSessionDuration: !Ref SessionDuration
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: CrossAccountOperationsAssumeRole
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${TrustedAccountId}:root'
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                sts:ExternalId: !Ref ExternalId
+              Bool:
+                aws:MultiFactorAuthPresent: 'true'  # Always require MFA for ops
+              IpAddress:
+                aws:SourceIp: !If [HasTrustedIPs, !Ref TrustedSourceIPs, !Ref 'AWS::NoValue']
+              StringLike:
+                aws:userid: !Sub '${TrustedAccountId}:*'
+              # Time-based access restriction (business hours UTC)
+              DateGreaterThan:
+                aws:CurrentTime: '08:00Z'
+              DateLessThan:
+                aws:CurrentTime: '18:00Z'
+      ManagedPolicyArns:
+        - !Ref CrossAccountOperationsPolicy
+      Tags:
+        - Key: Purpose
+          Value: CrossAccountAccess
+        - Key: AccessLevel
+          Value: Operations
+
+  CrossAccountOperationsPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      PolicyName: CrossAccount-Operations-Policy
+      Description: Operations permissions for cross-account access
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          # Full EC2 Management (with conditions)
+          - Sid: EC2OperationsAccess
+            Effect: Allow
+            Action:
+              - ec2:*
+            Resource: '*'
+            Condition:
+              StringEquals:
+                ec2:Region:
+                  - us-east-1
+                  - us-west-2
+                  - eu-west-1
+          
+          # S3 Operations Access
+          - Sid: S3OperationsAccess
+            Effect: Allow
+            Action:
+              - s3:*
+            Resource:
+              - 'arn:aws:s3:::*'
+              - 'arn:aws:s3:::*/*'
+            Condition:
+              StringNotLike:
+                s3:x-amz-server-side-encryption: 'aws:kms'  # Require encryption
+          
+          # CloudWatch and Monitoring
+          - Sid: MonitoringAccess
+            Effect: Allow
+            Action:
+              - cloudwatch:*
+              - logs:*
+              - sns:*
+              - events:*
+            Resource: '*'
+          
+          # Limited IAM for service roles
+          - Sid: ServiceRoleManagement
+            Effect: Allow
+            Action:
+              - iam:GetRole
+              - iam:ListRoles
+              - iam:PassRole
+            Resource: 
+              - !Sub 'arn:aws:iam::${AWS::AccountId}:role/service-*'
+              - !Sub 'arn:aws:iam::${AWS::AccountId}:role/lambda-*'
+              - !Sub 'arn:aws:iam::${AWS::AccountId}:role/ec2-*'
+          
+          # Deny Critical Actions
+          - Sid: DenyCriticalActions
+            Effect: Deny
+            Action:
+              - iam:CreateUser
+              - iam:DeleteUser
+              - iam:CreateRole
+              - iam:DeleteRole
+              - organizations:*
+              - account:CloseAccount
+            Resource: '*'
+
+  # Cross-Account Emergency Access Role
+  CrossAccountEmergencyRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: CrossAccount-Emergency-Role
+      Description: Emergency break-glass role for cross-account access
+      MaxSessionDuration: 3600  # 1 hour maximum
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: EmergencyAccess
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${TrustedAccountId}:root'
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                sts:ExternalId: !Sub '${ExternalId}-emergency'
+              Bool:
+                aws:MultiFactorAuthPresent: 'true'
+              IpAddress:
+                aws:SourceIp: !If [HasTrustedIPs, !Ref TrustedSourceIPs, !Ref 'AWS::NoValue']
+              # Additional security: require specific user
+              StringLike:
+                aws:userid: !Sub '${TrustedAccountId}:emergency-*'
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/PowerUserAccess
+      Tags:
+        - Key: Purpose
+          Value: EmergencyAccess
+        - Key: AccessLevel
+          Value: Emergency
+        - Key: MonitoringRequired
+          Value: 'true'
+
+  # CloudTrail for Cross-Account Activity Monitoring
+  CrossAccountCloudTrail:
+    Type: AWS::CloudTrail::Trail
+    Properties:
+      TrailName: CrossAccount-Activity-Trail
+      S3BucketName: !Ref CrossAccountLogsBucket
+      S3KeyPrefix: 'cross-account-logs/'
+      IncludeGlobalServiceEvents: true
+      IsMultiRegionTrail: true
+      EnableLogFileValidation: true
+      EventSelectors:
+        - ReadWriteType: All
+          IncludeManagementEvents: true
+          DataResources:
+            - Type: 'AWS::S3::Object'
+              Values: 
+                - 'arn:aws:s3:::*/*'
+            - Type: 'AWS::Lambda::Function'
+              Values:
+                - '*'
+      Tags:
+        - Key: Purpose
+          Value: CrossAccountMonitoring
+
+  CrossAccountLogsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub 'cross-account-logs-${AWS::AccountId}-${AWS::Region}'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteOldLogs
+            Status: Enabled
+            ExpirationInDays: 90
+            Transitions:
+              - TransitionInDays: 30
+                StorageClass: STANDARD_IA
+              - TransitionInDays: 60
+                StorageClass: GLACIER
+
+  CrossAccountLogsBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref CrossAccountLogsBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AWSCloudTrailAclCheck
+            Effect: Allow
+            Principal:
+              Service: cloudtrail.amazonaws.com
+            Action: s3:GetBucketAcl
+            Resource: !GetAtt CrossAccountLogsBucket.Arn
+          - Sid: AWSCloudTrailWrite
+            Effect: Allow
+            Principal:
+              Service: cloudtrail.amazonaws.com
+            Action: s3:PutObject
+            Resource: !Sub '${CrossAccountLogsBucket.Arn}/cross-account-logs/*'
+            Condition:
+              StringEquals:
+                s3:x-amz-acl: bucket-owner-full-control
+
+  # CloudWatch Alarms for Cross-Account Activity
+  CrossAccountAssumeRoleAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: CrossAccount-Role-Assumptions
+      AlarmDescription: Monitor cross-account role assumptions
+      MetricName: CrossAccountRoleAssumptions
+      Namespace: IAMSecurity
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 5
+      ComparisonOperator: GreaterThanThreshold
+      AlarmActions:
+        - !Ref SecurityAlertsTopic
+
+  SecurityAlertsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: CrossAccount-Security-Alerts
+      DisplayName: Cross-Account Security Alerts
+
+Outputs:
+  CrossAccountReadOnlyRoleArn:
+    Description: ARN of the Cross-Account Read-Only Role
+    Value: !GetAtt CrossAccountReadOnlyRole.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-CrossAccountReadOnlyRoleArn'
+
+  CrossAccountDeveloperRoleArn:
+    Description: ARN of the Cross-Account Developer Role
+    Value: !GetAtt CrossAccountDeveloperRole.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-CrossAccountDeveloperRoleArn'
+
+  CrossAccountOperationsRoleArn:
+    Description: ARN of the Cross-Account Operations Role
+    Value: !GetAtt CrossAccountOperationsRole.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-CrossAccountOperationsRoleArn'
+
+  CrossAccountEmergencyRoleArn:
+    Description: ARN of the Cross-Account Emergency Role
+    Value: !GetAtt CrossAccountEmergencyRole.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-CrossAccountEmergencyRoleArn'
+
+  AssumeRoleCommands:
+    Description: Commands to assume the cross-account roles
+    Value: !Sub |
+      # Read-Only Role:
+      aws sts assume-role --role-arn ${CrossAccountReadOnlyRole.Arn} --role-session-name CrossAccountReadOnly --external-id ${ExternalId}
+      
+      # Developer Role:
+      aws sts assume-role --role-arn ${CrossAccountDeveloperRole.Arn} --role-session-name CrossAccountDeveloper --external-id ${ExternalId}
+      
+      # Operations Role:
+      aws sts assume-role --role-arn ${CrossAccountOperationsRole.Arn} --role-session-name CrossAccountOperations --external-id ${ExternalId}
+      
+      # Emergency Role:
+      aws sts assume-role --role-arn ${CrossAccountEmergencyRole.Arn} --role-session-name CrossAccountEmergency --external-id ${ExternalId}-emergency
+
+  SecurityMonitoringResources:
+    Description: Resources created for security monitoring
+    Value: !Sub |
+      CloudTrail: ${CrossAccountCloudTrail}
+      S3 Logs Bucket: ${CrossAccountLogsBucket}
+      SNS Topic: ${SecurityAlertsTopic}
+      CloudWatch Alarm: ${CrossAccountAssumeRoleAlarm}

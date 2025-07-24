@@ -1,0 +1,812 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Container Image Security Scanning with Amazon ECR and Third-party Tools Integration'
+
+Parameters:
+  ApplicationName:
+    Type: String
+    Description: Name of the application
+    Default: 'container-scanning-lab'
+    
+  Environment:
+    Type: String
+    Description: Environment name
+    Default: 'dev'
+    AllowedValues: ['dev', 'staging', 'prod']
+    
+  NotificationEmail:
+    Type: String
+    Description: Email address for vulnerability notifications
+    Default: 'security@example.com'
+    
+  VulnerabilitySeverityThreshold:
+    Type: String
+    Description: Minimum severity level to trigger alerts
+    Default: 'HIGH'
+    AllowedValues: ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW']
+    
+  EnableImageQuarantine:
+    Type: String
+    Description: Enable automatic quarantine of vulnerable images
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+    
+  ScanOnPush:
+    Type: String
+    Description: Enable automatic scanning when images are pushed
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+
+Resources:
+  # ECR Repository with Enhanced Scanning
+  ContainerRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub '${ApplicationName}-${Environment}'
+      ImageScanningConfiguration:
+        ScanOnPush: !Ref ScanOnPush
+      ImageTagMutability: MUTABLE
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Keep last 10 production images",
+                "selection": {
+                  "tagStatus": "tagged",
+                  "tagPrefixList": ["prod"],
+                  "countType": "imageCountMoreThan",
+                  "countNumber": 10
+                },
+                "action": {
+                  "type": "expire"
+                }
+              },
+              {
+                "rulePriority": 2,
+                "description": "Keep last 5 development images",
+                "selection": {
+                  "tagStatus": "tagged",
+                  "tagPrefixList": ["dev", "staging"],
+                  "countType": "imageCountMoreThan",
+                  "countNumber": 5
+                },
+                "action": {
+                  "type": "expire"
+                }
+              },
+              {
+                "rulePriority": 3,
+                "description": "Delete untagged images older than 1 day",
+                "selection": {
+                  "tagStatus": "untagged",
+                  "countType": "sinceImagePushed",
+                  "countUnit": "days",
+                  "countNumber": 1
+                },
+                "action": {
+                  "type": "expire"
+                }
+              }
+            ]
+          }
+      RepositoryPolicyText:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowPushPull
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root'
+            Action:
+              - ecr:GetDownloadUrlForLayer
+              - ecr:BatchGetImage
+              - ecr:BatchCheckLayerAvailability
+              - ecr:PutImage
+              - ecr:InitiateLayerUpload
+              - ecr:UploadLayerPart
+              - ecr:CompleteLayerUpload
+          - Sid: AllowScanResults
+            Effect: Allow
+            Principal:
+              Service: inspector2.amazonaws.com
+            Action:
+              - ecr:DescribeRepositories
+              - ecr:DescribeImages
+              - ecr:DescribeImageScanFindings
+      Tags:
+        - Key: Application
+          Value: !Ref ApplicationName
+        - Key: Environment
+          Value: !Ref Environment
+
+  # S3 Bucket for Scan Reports and Artifacts
+  ScanResultsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${ApplicationName}-scan-results-${AWS::AccountId}-${AWS::Region}'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteOldReports
+            Status: Enabled
+            ExpirationInDays: 90
+            Transitions:
+              - TransitionInDays: 30
+                StorageClass: STANDARD_IA
+      NotificationConfiguration:
+        LambdaConfigurations:
+          - Event: s3:ObjectCreated:*
+            Function: !GetAtt ScanResultsProcessorFunction.Arn
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: prefix
+                    Value: scan-reports/
+      Tags:
+        - Key: Application
+          Value: !Ref ApplicationName
+        - Key: Environment
+          Value: !Ref Environment
+
+  # Lambda Function for Processing Scan Results
+  ScanResultsProcessorFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${ApplicationName}-scan-processor'
+      Runtime: python3.9
+      Handler: index.lambda_handler
+      Role: !GetAtt ScanProcessorRole.Arn
+      Timeout: 300
+      Environment:
+        Variables:
+          SNS_TOPIC_ARN: !Ref VulnerabilityNotificationTopic
+          SEVERITY_THRESHOLD: !Ref VulnerabilitySeverityThreshold
+          ENABLE_QUARANTINE: !Ref EnableImageQuarantine
+          ECR_REPOSITORY_URI: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${ContainerRepository}'
+          RESULTS_BUCKET: !Ref ScanResultsBucket
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+          import logging
+          from datetime import datetime
+          from botocore.exceptions import ClientError
+
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+
+          def lambda_handler(event, context):
+              """Process container image scan results and take actions"""
+              
+              ecr_client = boto3.client('ecr')
+              sns_client = boto3.client('sns')
+              s3_client = boto3.client('s3')
+              
+              sns_topic = os.environ['SNS_TOPIC_ARN']
+              severity_threshold = os.environ['SEVERITY_THRESHOLD']
+              enable_quarantine = os.environ.get('ENABLE_QUARANTINE', 'false').lower() == 'true'
+              repository_uri = os.environ['ECR_REPOSITORY_URI']
+              results_bucket = os.environ['RESULTS_BUCKET']
+              
+              try:
+                  # Handle different event sources
+                  if 'Records' in event:
+                      # S3 event - process uploaded scan report
+                      for record in event['Records']:
+                          if 'eventSource' in record and record['eventSource'] == 'aws:s3':
+                              bucket = record['s3']['bucket']['name']
+                              key = record['s3']['object']['key']
+                              process_s3_scan_report(s3_client, sns_client, bucket, key, severity_threshold, enable_quarantine)
+                  
+                  elif 'source' in event and event['source'] == 'aws.ecr':
+                      # ECR event - image scan completed
+                      process_ecr_scan_event(event, ecr_client, sns_client, s3_client, results_bucket, severity_threshold, enable_quarantine)
+                  
+                  else:
+                      # Direct invocation - scan all images in repository
+                      scan_repository_images(ecr_client, sns_client, s3_client, results_bucket, severity_threshold, enable_quarantine)
+                  
+                  return {
+                      'statusCode': 200,
+                      'body': json.dumps('Scan results processed successfully')
+                  }
+                  
+              except Exception as e:
+                  logger.error(f"Error processing scan results: {str(e)}")
+                  return {
+                      'statusCode': 500,
+                      'body': json.dumps(f'Error: {str(e)}')
+                  }
+
+          def process_ecr_scan_event(event, ecr_client, sns_client, s3_client, bucket, threshold, quarantine):
+              """Process ECR scan completion event"""
+              try:
+                  detail = event.get('detail', {})
+                  repository_name = detail.get('repository-name')
+                  image_digest = detail.get('image-digest')
+                  scan_status = detail.get('scan-status')
+                  
+                  logger.info(f"Processing ECR scan event for {repository_name}:{image_digest}, status: {scan_status}")
+                  
+                  if scan_status == 'COMPLETE':
+                      # Get scan results
+                      response = ecr_client.describe_image_scan_findings(
+                          repositoryName=repository_name,
+                          imageId={'imageDigest': image_digest}
+                      )
+                      
+                      findings = response.get('imageScanFindings', {})
+                      process_scan_findings(findings, repository_name, image_digest, sns_client, s3_client, bucket, threshold, quarantine)
+                  
+              except Exception as e:
+                  logger.error(f"Error processing ECR scan event: {str(e)}")
+                  raise
+
+          def scan_repository_images(ecr_client, sns_client, s3_client, bucket, threshold, quarantine):
+              """Scan all images in the repository"""
+              try:
+                  repository_name = os.environ['ECR_REPOSITORY_URI'].split('/')[-1]
+                  
+                  # List images in repository
+                  response = ecr_client.list_images(repositoryName=repository_name)
+                  
+                  for image in response['imageIds']:
+                      try:
+                          # Get scan results for each image
+                          scan_response = ecr_client.describe_image_scan_findings(
+                              repositoryName=repository_name,
+                              imageId=image
+                          )
+                          
+                          findings = scan_response.get('imageScanFindings', {})
+                          image_digest = image.get('imageDigest', 'unknown')
+                          
+                          process_scan_findings(findings, repository_name, image_digest, sns_client, s3_client, bucket, threshold, quarantine)
+                          
+                      except ClientError as e:
+                          if e.response['Error']['Code'] == 'ScanNotFoundException':
+                              logger.info(f"No scan results found for image {image}")
+                          else:
+                              logger.error(f"Error getting scan results for image {image}: {str(e)}")
+                  
+              except Exception as e:
+                  logger.error(f"Error scanning repository images: {str(e)}")
+                  raise
+
+          def process_scan_findings(findings, repository_name, image_digest, sns_client, s3_client, bucket, threshold, quarantine):
+              """Process scan findings and take appropriate actions"""
+              try:
+                  findings_list = findings.get('findings', [])
+                  vulnerability_counts = findings.get('findingCounts', {})
+                  
+                  logger.info(f"Processing {len(findings_list)} findings for {repository_name}:{image_digest}")
+                  
+                  # Categorize findings by severity
+                  critical_findings = [f for f in findings_list if f.get('severity') == 'CRITICAL']
+                  high_findings = [f for f in findings_list if f.get('severity') == 'HIGH']
+                  medium_findings = [f for f in findings_list if f.get('severity') == 'MEDIUM']
+                  low_findings = [f for f in findings_list if f.get('severity') == 'LOW']
+                  
+                  # Create detailed report
+                  report = {
+                      'timestamp': datetime.now().isoformat(),
+                      'repository': repository_name,
+                      'image_digest': image_digest,
+                      'scan_status': 'COMPLETE',
+                      'total_findings': len(findings_list),
+                      'vulnerability_counts': vulnerability_counts,
+                      'findings_by_severity': {
+                          'CRITICAL': len(critical_findings),
+                          'HIGH': len(high_findings),
+                          'MEDIUM': len(medium_findings),
+                          'LOW': len(low_findings)
+                      },
+                      'findings': findings_list[:50],  # Limit to first 50 for report size
+                      'actions_taken': []
+                  }
+                  
+                  # Determine if action is needed based on threshold
+                  action_needed = False
+                  if threshold == 'CRITICAL' and critical_findings:
+                      action_needed = True
+                  elif threshold == 'HIGH' and (critical_findings or high_findings):
+                      action_needed = True
+                  elif threshold == 'MEDIUM' and (critical_findings or high_findings or medium_findings):
+                      action_needed = True
+                  elif threshold == 'LOW' and findings_list:
+                      action_needed = True
+                  
+                  if action_needed:
+                      # Send notification
+                      send_vulnerability_notification(sns_client, os.environ['SNS_TOPIC_ARN'], report)
+                      report['actions_taken'].append('notification_sent')
+                      
+                      # Quarantine image if enabled and critical/high vulnerabilities found
+                      if quarantine and (critical_findings or high_findings):
+                          quarantine_image(repository_name, image_digest)
+                          report['actions_taken'].append('image_quarantined')
+                  
+                  # Save report to S3
+                  report_key = f"scan-reports/{datetime.now().strftime('%Y/%m/%d')}/{repository_name}-{image_digest[:12]}-{int(datetime.now().timestamp())}.json"
+                  s3_client.put_object(
+                      Bucket=bucket,
+                      Key=report_key,
+                      Body=json.dumps(report, indent=2),
+                      ContentType='application/json'
+                  )
+                  
+                  logger.info(f"Scan report saved to s3://{bucket}/{report_key}")
+                  
+              except Exception as e:
+                  logger.error(f"Error processing scan findings: {str(e)}")
+                  raise
+
+          def process_s3_scan_report(s3_client, sns_client, bucket, key, threshold, quarantine):
+              """Process scan report uploaded to S3"""
+              try:
+                  # Get the report from S3
+                  response = s3_client.get_object(Bucket=bucket, Key=key)
+                  report = json.loads(response['Body'].read())
+                  
+                  logger.info(f"Processing S3 scan report: {key}")
+                  
+                  # Check if action is needed based on findings
+                  findings_by_severity = report.get('findings_by_severity', {})
+                  
+                  action_needed = False
+                  if threshold == 'CRITICAL' and findings_by_severity.get('CRITICAL', 0) > 0:
+                      action_needed = True
+                  elif threshold == 'HIGH' and (findings_by_severity.get('CRITICAL', 0) > 0 or findings_by_severity.get('HIGH', 0) > 0):
+                      action_needed = True
+                  elif threshold == 'MEDIUM' and sum([findings_by_severity.get(s, 0) for s in ['CRITICAL', 'HIGH', 'MEDIUM']]) > 0:
+                      action_needed = True
+                  elif threshold == 'LOW' and report.get('total_findings', 0) > 0:
+                      action_needed = True
+                  
+                  if action_needed:
+                      send_vulnerability_notification(sns_client, os.environ['SNS_TOPIC_ARN'], report)
+                  
+              except Exception as e:
+                  logger.error(f"Error processing S3 scan report: {str(e)}")
+                  raise
+
+          def send_vulnerability_notification(sns_client, topic_arn, report):
+              """Send vulnerability notification"""
+              try:
+                  findings_by_severity = report.get('findings_by_severity', {})
+                  
+                  message = f"""
+                  Container Image Vulnerability Alert
+                  
+                  Repository: {report.get('repository', 'Unknown')}
+                  Image Digest: {report.get('image_digest', 'Unknown')[:12]}...
+                  Total Findings: {report.get('total_findings', 0)}
+                  
+                  Severity Breakdown:
+                  - Critical: {findings_by_severity.get('CRITICAL', 0)}
+                  - High: {findings_by_severity.get('HIGH', 0)}
+                  - Medium: {findings_by_severity.get('MEDIUM', 0)}
+                  - Low: {findings_by_severity.get('LOW', 0)}
+                  
+                  Actions Taken: {', '.join(report.get('actions_taken', ['none']))}
+                  
+                  Please review the findings and take appropriate remediation actions.
+                  """
+                  
+                  sns_client.publish(
+                      TopicArn=topic_arn,
+                      Subject='Container Image Vulnerability Alert',
+                      Message=message
+                  )
+                  
+                  logger.info("Vulnerability notification sent successfully")
+                  
+              except Exception as e:
+                  logger.error(f"Error sending vulnerability notification: {str(e)}")
+
+          def quarantine_image(repository_name, image_digest):
+              """Quarantine vulnerable image by adding a tag"""
+              try:
+                  ecr_client = boto3.client('ecr')
+                  
+                  # Add quarantine tag to the image
+                  ecr_client.put_image(
+                      repositoryName=repository_name,
+                      imageManifest=json.dumps({
+                          'mediaType': 'application/vnd.docker.distribution.manifest.v2+json',
+                          'schemaVersion': 2
+                      }),
+                      imageTag=f'QUARANTINED-{int(datetime.now().timestamp())}'
+                  )
+                  
+                  logger.info(f"Image {repository_name}:{image_digest} has been quarantined")
+                  
+              except Exception as e:
+                  logger.error(f"Error quarantining image: {str(e)}")
+
+  # IAM Role for Scan Processor Lambda
+  ScanProcessorRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ApplicationName}-scan-processor-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: ScanProcessorPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ecr:DescribeImages
+                  - ecr:DescribeImageScanFindings
+                  - ecr:ListImages
+                  - ecr:PutImage
+                  - ecr:BatchGetImage
+                Resource: !GetAtt ContainerRepository.Arn
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                Resource: !Sub '${ScanResultsBucket}/*'
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: !Ref VulnerabilityNotificationTopic
+
+  # Permission for S3 to invoke Lambda
+  ScanProcessorS3Permission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref ScanResultsProcessorFunction
+      Action: lambda:InvokeFunction
+      Principal: s3.amazonaws.com
+      SourceArn: !Sub '${ScanResultsBucket.Arn}'
+
+  # CodeBuild Project for Container Scanning
+  ContainerScanProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub '${ApplicationName}-container-scan'
+      Description: Container image security scanning project
+      ServiceRole: !GetAtt ContainerScanRole.Arn
+      Artifacts:
+        Type: S3
+        Location: !Sub '${ScanResultsBucket}/build-artifacts'
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_MEDIUM
+        Image: aws/codebuild/amazonlinux2-x86_64-standard:3.0
+        PrivilegedMode: true
+        EnvironmentVariables:
+          - Name: ECR_REPOSITORY_URI
+            Value: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${ContainerRepository}'
+          - Name: RESULTS_BUCKET
+            Value: !Ref ScanResultsBucket
+          - Name: SNS_TOPIC_ARN
+            Value: !Ref VulnerabilityNotificationTopic
+      Source:
+        Type: NO_SOURCE
+        BuildSpec: |
+          version: 0.2
+          phases:
+            install:
+              runtime-versions:
+                docker: 20
+              commands:
+                - echo "Installing security scanning tools"
+                - curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh | sh -s -- -b /usr/local/bin
+                - curl -sSfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
+                - pip install docker-bench-security
+            pre_build:
+              commands:
+                - echo "Logging in to Amazon ECR"
+                - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $ECR_REPOSITORY_URI
+                - echo "Pulling latest images for scanning"
+                - docker pull $ECR_REPOSITORY_URI:latest || echo "No latest tag found"
+            build:
+              commands:
+                - echo "Running container security scans"
+                - |
+                  # Get list of images to scan
+                  IMAGES=$(aws ecr list-images --repository-name $(echo $ECR_REPOSITORY_URI | cut -d'/' -f2) --query 'imageIds[?imageTag!=null].imageTag' --output text)
+                  
+                  for TAG in $IMAGES; do
+                    echo "Scanning image: $ECR_REPOSITORY_URI:$TAG"
+                    
+                    # Pull the image
+                    docker pull $ECR_REPOSITORY_URI:$TAG
+                    
+                    # Run Trivy scan
+                    trivy image --format json --output trivy-$TAG.json $ECR_REPOSITORY_URI:$TAG || true
+                    
+                    # Run Grype scan
+                    grype $ECR_REPOSITORY_URI:$TAG -o json > grype-$TAG.json || true
+                    
+                    # Run basic Docker security checks
+                    docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+                      -v $(pwd):/host \
+                      docker/docker-bench-security > docker-bench-$TAG.txt || true
+                    
+                    # Upload results to S3
+                    aws s3 cp trivy-$TAG.json s3://$RESULTS_BUCKET/scan-reports/trivy/
+                    aws s3 cp grype-$TAG.json s3://$RESULTS_BUCKET/scan-reports/grype/
+                    aws s3 cp docker-bench-$TAG.txt s3://$RESULTS_BUCKET/scan-reports/docker-bench/
+                    
+                    echo "Scan completed for $TAG"
+                  done
+                - |
+                  # Generate summary report
+                  python3 << 'EOF'
+                  import json
+                  import boto3
+                  import os
+                  from datetime import datetime
+                  
+                  # Create summary of all scans
+                  summary = {
+                      'timestamp': datetime.now().isoformat(),
+                      'repository': os.environ['ECR_REPOSITORY_URI'],
+                      'scans_completed': [],
+                      'total_vulnerabilities': 0,
+                      'critical_vulnerabilities': 0,
+                      'high_vulnerabilities': 0
+                  }
+                  
+                  # Process Trivy results
+                  import glob
+                  for trivy_file in glob.glob('trivy-*.json'):
+                      try:
+                          with open(trivy_file, 'r') as f:
+                              trivy_data = json.load(f)
+                              
+                          tag = trivy_file.replace('trivy-', '').replace('.json', '')
+                          vulnerabilities = []
+                          
+                          for result in trivy_data.get('Results', []):
+                              for vuln in result.get('Vulnerabilities', []):
+                                  vulnerabilities.append(vuln)
+                                  if vuln.get('Severity') == 'CRITICAL':
+                                      summary['critical_vulnerabilities'] += 1
+                                  elif vuln.get('Severity') == 'HIGH':
+                                      summary['high_vulnerabilities'] += 1
+                          
+                          summary['scans_completed'].append({
+                              'tag': tag,
+                              'tool': 'trivy',
+                              'vulnerabilities_found': len(vulnerabilities)
+                          })
+                          summary['total_vulnerabilities'] += len(vulnerabilities)
+                          
+                      except Exception as e:
+                          print(f"Error processing {trivy_file}: {e}")
+                  
+                  # Save summary
+                  with open('scan-summary.json', 'w') as f:
+                      json.dump(summary, f, indent=2)
+                  
+                  print(f"Scan summary: {summary}")
+                  EOF
+                - aws s3 cp scan-summary.json s3://$RESULTS_BUCKET/scan-reports/summaries/
+            post_build:
+              commands:
+                - echo "Container security scanning completed"
+                - |
+                  # Send notification if critical vulnerabilities found
+                  CRITICAL_COUNT=$(cat scan-summary.json | python3 -c "import sys, json; print(json.load(sys.stdin)['critical_vulnerabilities'])")
+                  if [ "$CRITICAL_COUNT" -gt 0 ]; then
+                    aws sns publish --topic-arn $SNS_TOPIC_ARN --subject "Critical Vulnerabilities Found" --message "Found $CRITICAL_COUNT critical vulnerabilities in container images. Check S3 bucket for detailed reports."
+                  fi
+      Tags:
+        - Key: Application
+          Value: !Ref ApplicationName
+        - Key: Environment
+          Value: !Ref Environment
+
+  # IAM Role for Container Scan CodeBuild
+  ContainerScanRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ApplicationName}-container-scan-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: ContainerScanPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/*'
+              - Effect: Allow
+                Action:
+                  - ecr:GetAuthorizationToken
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:BatchGetImage
+                  - ecr:ListImages
+                  - ecr:DescribeImages
+                  - ecr:DescribeImageScanFindings
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                Resource: !Sub '${ScanResultsBucket}/*'
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: !Ref VulnerabilityNotificationTopic
+
+  # SNS Topic for Vulnerability Notifications
+  VulnerabilityNotificationTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub '${ApplicationName}-vulnerability-notifications'
+      DisplayName: Container Vulnerability Notifications
+
+  VulnerabilityNotificationSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      Protocol: email
+      TopicArn: !Ref VulnerabilityNotificationTopic
+      Endpoint: !Ref NotificationEmail
+
+  # EventBridge Rule for ECR Scan Events
+  ECRScanEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub '${ApplicationName}-ecr-scan-events'
+      Description: Capture ECR image scan completion events
+      EventPattern:
+        source:
+          - aws.ecr
+        detail-type:
+          - ECR Image Scan
+        detail:
+          scan-status:
+            - COMPLETE
+          repository-name:
+            - !Ref ContainerRepository
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt ScanResultsProcessorFunction.Arn
+          Id: ScanProcessorTarget
+
+  # Permission for EventBridge to invoke Lambda
+  ECRScanEventPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref ScanResultsProcessorFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt ECRScanEventRule.Arn
+
+  # CloudWatch Dashboard for Container Security
+  ContainerSecurityDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub '${ApplicationName}-container-security'
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "metric",
+              "x": 0,
+              "y": 0,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  [ "AWS/CodeBuild", "Builds", "ProjectName", "${ContainerScanProject}" ],
+                  [ ".", "SucceededBuilds", ".", "." ],
+                  [ ".", "FailedBuilds", ".", "." ]
+                ],
+                "period": 300,
+                "stat": "Sum",
+                "region": "${AWS::Region}",
+                "title": "Container Scan Builds"
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12,
+              "y": 0,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  [ "AWS/Lambda", "Invocations", "FunctionName", "${ScanResultsProcessorFunction}" ],
+                  [ ".", "Errors", ".", "." ],
+                  [ ".", "Duration", ".", "." ]
+                ],
+                "period": 300,
+                "stat": "Sum",
+                "region": "${AWS::Region}",
+                "title": "Scan Results Processor"
+              }
+            }
+          ]
+        }
+
+Outputs:
+  ECRRepositoryURI:
+    Description: URI of the ECR repository
+    Value: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${ContainerRepository}'
+    Export:
+      Name: !Sub '${AWS::StackName}-ECRRepositoryURI'
+
+  ScanResultsBucketName:
+    Description: Name of the S3 bucket for scan results
+    Value: !Ref ScanResultsBucket
+    Export:
+      Name: !Sub '${AWS::StackName}-ScanResultsBucketName'
+
+  ScanProcessorFunctionArn:
+    Description: ARN of the scan results processor function
+    Value: !GetAtt ScanResultsProcessorFunction.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-ScanProcessorFunctionArn'
+
+  ContainerScanProjectName:
+    Description: Name of the CodeBuild project for container scanning
+    Value: !Ref ContainerScanProject
+    Export:
+      Name: !Sub '${AWS::StackName}-ContainerScanProjectName'
+
+  NotificationTopicArn:
+    Description: ARN of the vulnerability notification topic
+    Value: !Ref VulnerabilityNotificationTopic
+    Export:
+      Name: !Sub '${AWS::StackName}-NotificationTopicArn'
+
+  DashboardURL:
+    Description: URL to the CloudWatch Dashboard
+    Value: !Sub 'https://${AWS::Region}.console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#dashboards:name=${ContainerSecurityDashboard}'
+
+  UsageInstructions:
+    Description: Instructions for using the container scanning system
+    Value: !Sub |
+      1. Push container images to ECR: docker push ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${ContainerRepository}:tag
+      2. Automatic scanning will trigger on push (if enabled)
+      3. Manual scan: aws codebuild start-build --project-name ${ContainerScanProject}
+      4. View results: aws s3 ls s3://${ScanResultsBucket}/scan-reports/
+      5. Monitor dashboard: https://${AWS::Region}.console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#dashboards:name=${ContainerSecurityDashboard}
+
+  SecurityFeatures:
+    Description: Container security features implemented
+    Value: |
+      ✓ Automatic vulnerability scanning on image push
+      ✓ Multi-tool scanning (ECR native, Trivy, Grype)
+      ✓ Severity-based alerting and quarantine
+      ✓ Comprehensive scan result storage and reporting
+      ✓ EventBridge integration for real-time processing
+      ✓ Lifecycle policies for cost optimization
+      ✓ Docker security benchmarking
+      ✓ Automated notification system
+      ✓ CloudWatch monitoring and dashboards
+      ✓ S3 integration for detailed reporting
