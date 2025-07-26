@@ -1,0 +1,219 @@
+# Test Configuration for AWS DevOps Labs Testing Framework
+
+# Test Environment Settings
+environment:
+  aws_region: "us-east-1"
+  test_timeout: 300  # 5 minutes
+  cleanup_timeout: 180  # 3 minutes
+  max_concurrent_tests: 3
+
+# Test Data Configuration
+test_data:
+  session_prefix: "test-session"
+  stack_prefix: "test-stack"
+  bucket_prefix: "test-bucket"
+  
+  # Test AWS services and resources
+  test_instance_types:
+    - "t3.micro"
+    - "t3.small"
+  
+  test_regions:
+    - "us-east-1"
+    - "us-west-2"
+  
+  # Sample test parameters
+  test_parameters:
+    InstanceType: "t3.micro"
+    KeyName: "test-key-pair"
+    SessionId: "test-session-123"
+    LabName: "test-lab"
+
+# Mock AWS Service Responses
+mock_responses:
+  cloudformation:
+    validate_template:
+      Parameters:
+        - ParameterKey: "InstanceType"
+          DefaultValue: "t3.micro"
+          NoEcho: false
+          Description: "EC2 instance type"
+      Description: "Test CloudFormation template"
+      Capabilities: []
+    
+    list_stacks:
+      StackSummaries:
+        - StackName: "test-lab-stack"
+          StackStatus: "CREATE_COMPLETE"
+          CreationTime: "2024-01-01T00:00:00Z"
+    
+    describe_stacks:
+      Stacks:
+        - StackName: "test-lab-stack"
+          StackStatus: "CREATE_COMPLETE"
+          CreationTime: "2024-01-01T00:00:00Z"
+          Tags:
+            - Key: "Project"
+              Value: "AWSDevOpsLabs"
+            - Key: "SessionId"
+              Value: "test-session-123"
+  
+  ec2:
+    describe_instances:
+      Reservations:
+        - Instances:
+            - InstanceId: "i-1234567890abcdef0"
+              InstanceType: "t3.micro"
+              State:
+                Name: "running"
+              LaunchTime: "2024-01-01T00:00:00Z"
+              Tags:
+                - Key: "Project"
+                  Value: "AWSDevOpsLabs"
+                - Key: "SessionId"
+                  Value: "test-session-123"
+  
+  lambda:
+    list_functions:
+      Functions:
+        - FunctionName: "test-lab-function"
+          Runtime: "python3.9"
+          LastModified: "2024-01-01T00:00:00Z"
+          FunctionArn: "arn:aws:lambda:us-east-1:123456789012:function:test-lab-function"
+    
+    list_tags:
+      Tags:
+        Project: "AWSDevOpsLabs"
+        SessionId: "test-session-123"
+
+# Test Validation Rules
+validation:
+  cloudformation:
+    required_tags:
+      - "Project"
+      - "SessionId"
+      - "LabName"
+    
+    security_checks:
+      - "no_wildcard_security_groups"
+      - "s3_encryption_enabled"
+      - "iam_least_privilege"
+    
+    cost_limits:
+      max_hourly_cost: 10.0
+      max_daily_cost: 50.0
+  
+  lab_structure:
+    required_files:
+      - "lab-guide.md"
+      - "scripts/provision.sh"
+      - "scripts/cleanup.sh"
+      - "templates/infrastructure.yaml"
+    
+    required_directories:
+      - "scripts"
+      - "templates"
+    
+    script_requirements:
+      executable: true
+      timeout: 300
+      error_handling: true
+  
+  resource_limits:
+    max_ec2_instances: 5
+    max_lambda_functions: 10
+    max_s3_buckets: 3
+    allowed_instance_types:
+      - "t3.micro"
+      - "t3.small"
+      - "t3.medium"
+
+# Test Reporting Configuration
+reporting:
+  output_formats:
+    - "json"
+    - "html"
+    - "junit"
+  
+  include_coverage: true
+  coverage_threshold: 80.0
+  
+  metrics:
+    - "test_duration"
+    - "resource_usage"
+    - "cost_estimation"
+    - "error_rates"
+  
+  notifications:
+    slack_webhook: null  # Set if Slack notifications desired
+    email_recipients: []  # Set if email notifications desired
+
+# Continuous Integration Settings
+ci:
+  parallel_execution: true
+  max_parallel_jobs: 3
+  retry_failed_tests: true
+  max_retries: 2
+  
+  test_stages:
+    - name: "unit"
+      tests: ["test_lab_manager.py"]
+      timeout: 300
+    - name: "integration"
+      tests: ["test_cloudformation_validation.py"]
+      timeout: 600
+    - name: "e2e"
+      tests: ["test_end_to_end.py"]
+      timeout: 900
+  
+  cleanup_policy: "always"  # always, on_failure, never
+
+# Performance Testing Configuration
+performance:
+  load_testing:
+    enabled: false
+    concurrent_sessions: 5
+    duration_minutes: 10
+  
+  stress_testing:
+    enabled: false
+    max_resources: 20
+    ramp_up_time: 60
+  
+  benchmarks:
+    lab_startup_time: 120  # seconds
+    cleanup_time: 60  # seconds
+    resource_provisioning_time: 300  # seconds
+
+# Security Testing Configuration
+security:
+  vulnerability_scanning:
+    enabled: true
+    tools:
+      - "bandit"  # Python security linter
+      - "safety"  # Python dependency vulnerability scanner
+  
+  compliance_checks:
+    enabled: true
+    standards:
+      - "AWS_CONFIG_RULES"
+      - "CIS_BENCHMARKS"
+  
+  penetration_testing:
+    enabled: false  # Enable only in dedicated test environments
+
+# Debugging and Troubleshooting
+debugging:
+  verbose_logging: false
+  save_test_artifacts: true
+  artifact_retention_days: 7
+  
+  debug_modes:
+    - "step_by_step"
+    - "resource_tracking"
+    - "cost_monitoring"
+  
+  troubleshooting:
+    auto_cleanup_on_failure: true
+    generate_debug_reports: true
+    include_aws_logs: true

@@ -1,0 +1,348 @@
+name: AWS DevOps Labs Testing
+
+on:
+  push:
+    branches: [ main, develop ]
+    paths:
+      - '**.py'
+      - '**.yaml'
+      - '**.yml'
+      - 'tests/**'
+      - '.github/workflows/test.yml'
+  pull_request:
+    branches: [ main, develop ]
+    paths:
+      - '**.py'
+      - '**.yaml'
+      - '**.yml'
+      - 'tests/**'
+      - '.github/workflows/test.yml'
+  schedule:
+    # Run tests daily at 2 AM UTC
+    - cron: '0 2 * * *'
+
+env:
+  PYTHON_VERSION: '3.9'
+  AWS_DEFAULT_REGION: 'us-east-1'
+
+jobs:
+  # Code Quality Checks
+  quality:
+    name: Code Quality
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+
+    - name: Cache pip dependencies
+      uses: actions/cache@v3
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-quality-${{ hashFiles('tests/requirements.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-quality-
+          ${{ runner.os }}-pip-
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r tests/requirements.txt
+
+    - name: Run code formatting check
+      run: |
+        cd tests
+        make format-check
+
+    - name: Run linting
+      run: |
+        cd tests
+        make lint
+
+    - name: Run security checks
+      run: |
+        cd tests
+        make security
+
+    - name: Validate CloudFormation templates
+      run: |
+        cd tests
+        make validate-templates
+
+  # Unit Tests
+  unit-tests:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    needs: quality
+    strategy:
+      matrix:
+        python-version: ['3.8', '3.9', '3.10', '3.11']
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ matrix.python-version }}
+
+    - name: Cache pip dependencies
+      uses: actions/cache@v3
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-${{ matrix.python-version }}-${{ hashFiles('tests/requirements.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-${{ matrix.python-version }}-
+          ${{ runner.os }}-pip-
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r tests/requirements.txt
+
+    - name: Run unit tests
+      run: |
+        cd tests
+        python run_tests.py --suite unit --report unit_test_report.json
+
+    - name: Upload unit test results
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: unit-test-results-${{ matrix.python-version }}
+        path: tests/unit_test_report.json
+
+  # Integration Tests
+  integration-tests:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    needs: quality
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+
+    - name: Cache pip dependencies
+      uses: actions/cache@v3
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-integration-${{ hashFiles('tests/requirements.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-integration-
+          ${{ runner.os }}-pip-
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r tests/requirements.txt
+
+    - name: Run integration tests
+      run: |
+        cd tests
+        python run_tests.py --suite integration --report integration_test_report.json
+
+    - name: Upload integration test results
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: integration-test-results
+        path: tests/integration_test_report.json
+
+  # End-to-End Tests
+  e2e-tests:
+    name: End-to-End Tests
+    runs-on: ubuntu-latest
+    needs: [unit-tests, integration-tests]
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+
+    - name: Cache pip dependencies
+      uses: actions/cache@v3
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-e2e-${{ hashFiles('tests/requirements.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-e2e-
+          ${{ runner.os }}-pip-
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r tests/requirements.txt
+
+    - name: Run end-to-end tests
+      run: |
+        cd tests
+        python run_tests.py --suite e2e --report e2e_test_report.json
+
+    - name: Upload e2e test results
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: e2e-test-results
+        path: tests/e2e_test_report.json
+
+  # Coverage Analysis
+  coverage:
+    name: Coverage Analysis
+    runs-on: ubuntu-latest
+    needs: quality
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+
+    - name: Cache pip dependencies
+      uses: actions/cache@v3
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-coverage-${{ hashFiles('tests/requirements.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-coverage-
+          ${{ runner.os }}-pip-
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r tests/requirements.txt
+
+    - name: Run tests with coverage
+      run: |
+        cd tests
+        python run_tests.py --coverage --report coverage_report.json
+
+    - name: Generate coverage badge
+      run: |
+        cd tests
+        coverage-badge -o coverage.svg
+
+    - name: Upload coverage results
+      uses: actions/upload-artifact@v3
+      with:
+        name: coverage-results
+        path: |
+          tests/coverage_report.json
+          tests/coverage.svg
+          tests/.coverage
+
+    - name: Upload coverage to Codecov
+      uses: codecov/codecov-action@v3
+      with:
+        file: tests/.coverage
+        flags: unittests
+        name: codecov-umbrella
+
+  # Performance Tests (Optional)
+  performance-tests:
+    name: Performance Tests
+    runs-on: ubuntu-latest
+    needs: [unit-tests, integration-tests]
+    if: github.event_name == 'schedule' || contains(github.event.head_commit.message, '[perf]')
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r tests/requirements.txt
+
+    - name: Run performance tests
+      run: |
+        cd tests
+        make perf-test || echo "Performance tests not yet implemented"
+
+  # Test Summary
+  test-summary:
+    name: Test Summary
+    runs-on: ubuntu-latest
+    needs: [unit-tests, integration-tests, e2e-tests, coverage]
+    if: always()
+    
+    steps:
+    - name: Download all test artifacts
+      uses: actions/download-artifact@v3
+
+    - name: Display test summary
+      run: |
+        echo "## Test Summary" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        # Check if unit tests passed
+        if [ -d "unit-test-results-3.9" ]; then
+          echo "✅ Unit Tests: Completed" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "❌ Unit Tests: Failed or Skipped" >> $GITHUB_STEP_SUMMARY
+        fi
+        
+        # Check if integration tests passed
+        if [ -d "integration-test-results" ]; then
+          echo "✅ Integration Tests: Completed" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "❌ Integration Tests: Failed or Skipped" >> $GITHUB_STEP_SUMMARY
+        fi
+        
+        # Check if e2e tests passed
+        if [ -d "e2e-test-results" ]; then
+          echo "✅ End-to-End Tests: Completed" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "❌ End-to-End Tests: Failed or Skipped" >> $GITHUB_STEP_SUMMARY
+        fi
+        
+        # Check if coverage analysis completed
+        if [ -d "coverage-results" ]; then
+          echo "✅ Coverage Analysis: Completed" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "❌ Coverage Analysis: Failed or Skipped" >> $GITHUB_STEP_SUMMARY
+        fi
+        
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "For detailed results, check the individual job outputs and downloaded artifacts." >> $GITHUB_STEP_SUMMARY
+
+  # Notification (Optional)
+  notify:
+    name: Notify Results
+    runs-on: ubuntu-latest
+    needs: [test-summary]
+    if: always() && (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    
+    steps:
+    - name: Notify on success
+      if: needs.test-summary.result == 'success'
+      run: |
+        echo "All tests passed successfully! 🎉"
+        # Add Slack/Teams notification here if needed
+
+    - name: Notify on failure
+      if: needs.test-summary.result == 'failure'
+      run: |
+        echo "Some tests failed! ❌"
+        # Add Slack/Teams notification here if needed

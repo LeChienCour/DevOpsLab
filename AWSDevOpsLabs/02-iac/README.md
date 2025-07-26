@@ -1,38 +1,313 @@
 # Infrastructure as Code (IaC) Labs
 
-This module covers AWS Infrastructure as Code (IaC) tools and practices, demonstrating how to define, deploy, and manage AWS infrastructure using code.
+This module provides comprehensive hands-on experience with AWS Infrastructure as Code (IaC) tools and practices, demonstrating how to define, deploy, and manage AWS infrastructure using declarative code. These labs are designed to help you master IaC concepts for the AWS DevOps Professional certification.
 
-## Labs Available
+## 🎯 Learning Objectives
 
-- **CloudFormation**: Learn advanced AWS CloudFormation techniques by implementing a multi-tier application architecture using nested stacks, change sets, and drift detection.
-- **Terraform**: Master Terraform configuration and state management for AWS resources, creating reusable modules and implementing remote state backends.
-- **CDK**: Learn how to provision and manage AWS infrastructure using the AWS Cloud Development Kit (CDK) with TypeScript.
+By completing these labs, you will:
+- Master advanced CloudFormation techniques including nested stacks and drift detection
+- Implement Terraform best practices with modules and remote state management
+- Build infrastructure using AWS CDK with programming languages
+- Understand when to use each IaC tool and their trade-offs
+- Implement infrastructure testing and validation strategies
 
-## Prerequisites
+## 📚 Labs Available
 
-- AWS Account with administrative access
-- AWS CLI installed and configured with appropriate permissions
-- Basic understanding of Infrastructure as Code concepts
-- Tool-specific requirements:
-  - CloudFormation: Basic understanding of YAML syntax
-  - Terraform: Terraform CLI installed (version 1.0+)
-  - CDK: Node.js 18+, npm, and AWS CDK CLI installed
+### [CloudFormation Advanced Lab](cloudformation/lab-guide.md)
+**Duration**: 90 minutes | **Difficulty**: Advanced
 
-## Troubleshooting
+Learn advanced AWS CloudFormation techniques by implementing a multi-tier application architecture using nested stacks, change sets, and drift detection.
 
-Each lab guide includes a troubleshooting section to help you resolve common issues:
+**Key Topics**:
+- Nested CloudFormation stacks for modular infrastructure
+- Cross-stack references and resource exports
+- Change sets for previewing infrastructure changes
+- Configuration drift detection and remediation
+- Custom resources with Lambda functions
+- Stack sets for multi-account deployments
 
-- Common issues and solutions specific to each IaC tool
-- Debugging commands and techniques
-- Log analysis guidance
-- General troubleshooting approaches
+**Resources Created**:
+- Parent CloudFormation stack orchestrating nested stacks
+- Network stack (VPC, subnets, route tables)
+- Security stack (security groups, IAM roles)
+- Application stack (EC2 instances, load balancer)
+- S3 bucket for template storage
+- Lambda function for custom resources
 
-## Estimated Costs
+### [Terraform Infrastructure Lab](terraform/lab-guide.md)
+**Duration**: 75 minutes | **Difficulty**: Intermediate
 
-- VPC and Networking: $0.00/day (free)
-- NAT Gateway: ~$0.045/hour (~$32/month) - most expensive component
-- EC2/ECS: Varies by lab, typically $0.50-$1.00/day
-- S3 Storage: Minimal for templates and state storage
-- **Total estimated cost**: $0.50-$2.00/day (can be reduced by destroying resources when not in use)
+Master Terraform configuration and state management for AWS resources, creating reusable modules and implementing remote state backends.
 
-> **Important**: Always follow the cleanup instructions at the end of each lab to avoid ongoing charges to your AWS account.
+**Key Topics**:
+- Terraform configuration language (HCL) best practices
+- Resource dependencies and lifecycle management
+- Terraform modules for code reusability
+- Remote state backends with S3 and DynamoDB
+- Terraform workspaces for multi-environment management
+- State file management and troubleshooting
+
+**Resources Created**:
+- Terraform modules for VPC, security, and compute
+- S3 bucket and DynamoDB table for remote state
+- Multi-environment infrastructure (dev, staging, prod)
+- Terraform workspace configurations
+- Resource tagging and naming conventions
+
+### [CDK Infrastructure Lab](cdk/lab-guide.md)
+**Duration**: 60 minutes | **Difficulty**: Intermediate
+
+Learn how to provision and manage AWS infrastructure using the AWS Cloud Development Kit (CDK) with TypeScript and Python.
+
+**Key Topics**:
+- CDK constructs and higher-level abstractions
+- Infrastructure definition using programming languages
+- CDK Pipelines for self-mutating deployments
+- Custom constructs and construct libraries
+- CDK testing strategies and best practices
+- Integration with existing CloudFormation templates
+
+**Resources Created**:
+- CDK application with multiple stacks
+- Custom constructs for common patterns
+- CDK Pipeline for automated deployments
+- CloudFormation templates generated by CDK
+- Unit and integration tests for infrastructure
+
+## 🔧 Prerequisites
+
+### Technical Requirements
+- **AWS Account**: With administrative access or appropriate IAM permissions
+- **AWS CLI**: Version 2.x configured with your credentials
+- **Git**: For version control and collaboration
+- **Text Editor/IDE**: VS Code with relevant extensions recommended
+
+### Tool-Specific Requirements
+
+#### CloudFormation
+- **YAML/JSON Knowledge**: Understanding of template syntax
+- **AWS Services**: Familiarity with core AWS services
+- **No Additional Tools**: CloudFormation is native to AWS
+
+#### Terraform
+- **Terraform CLI**: Version 1.0+ installed locally
+- **HCL Syntax**: Understanding of HashiCorp Configuration Language
+- **State Management**: Concepts of Terraform state and backends
+
+#### CDK
+- **Node.js**: Version 18+ for TypeScript CDK
+- **Python**: Version 3.8+ for Python CDK
+- **AWS CDK CLI**: `npm install -g aws-cdk`
+- **Programming Knowledge**: TypeScript or Python experience
+
+### Knowledge Prerequisites
+- **Infrastructure Concepts**: Understanding of networking, compute, and storage
+- **AWS Services**: Familiarity with VPC, EC2, S3, IAM, and CloudFormation
+- **DevOps Practices**: CI/CD concepts and automation principles
+- **Version Control**: Git workflows and branching strategies
+
+### AWS Permissions Required
+Your IAM user/role needs these managed policies or equivalent permissions:
+- `PowerUserAccess` (recommended for full functionality)
+- Or specific policies:
+  - `AWSCloudFormationFullAccess`
+  - `AmazonEC2FullAccess`
+  - `AmazonS3FullAccess`
+  - `IAMFullAccess`
+  - `AmazonVPCFullAccess`
+
+## 💰 Cost Breakdown
+
+### Free Tier Eligible Services
+- **CloudFormation**: Always free (pay only for underlying resources)
+- **S3**: 5GB storage, 20,000 GET requests, 2,000 PUT requests/month
+- **EC2**: 750 hours/month of t2.micro or t3.micro instances
+- **VPC**: Basic VPC components are free
+
+### Paid Services
+- **NAT Gateway**: $0.045/hour + $0.045/GB processed (~$32/month if left running)
+- **Application Load Balancer**: $0.0225/hour + $0.008/LCU-hour
+- **EC2 Instances**: ~$0.0104/hour for t3.micro (varies by region)
+- **EBS Volumes**: $0.10/GB/month for gp3 storage
+- **DynamoDB**: $0.25/million read requests, $1.25/million write requests
+
+### Estimated Lab Costs
+| Lab | Duration | Free Tier Cost | Standard Cost |
+|-----|----------|----------------|---------------|
+| CloudFormation | 90 min | $0.00 | $3.00 |
+| Terraform | 75 min | $0.00 | $2.50 |
+| CDK | 60 min | $0.00 | $2.00 |
+| **Total** | **3.75 hours** | **$0.00** | **$7.50** |
+
+> **⚠️ Cost Warning**: NAT Gateways are the most expensive component. Some labs use NAT Gateways for realistic scenarios but provide alternatives using NAT instances or public subnets only.
+
+> **💡 Cost Optimization Tips**:
+> - Destroy resources immediately after completing labs
+> - Use t3.micro instances (Free Tier eligible)
+> - Consider NAT instances instead of NAT Gateways for learning
+> - Monitor costs with AWS Budgets and billing alerts
+> - Use Terraform/CDK destroy commands religiously
+
+## 🚀 Getting Started
+
+### Recommended Learning Path
+1. **CloudFormation Lab** → Foundation of AWS-native IaC
+2. **Terraform Lab** → Multi-cloud IaC with advanced state management
+3. **CDK Lab** → Programming language-based infrastructure
+
+### Tool Comparison Guide
+
+| Feature | CloudFormation | Terraform | CDK |
+|---------|----------------|-----------|-----|
+| **Language** | YAML/JSON | HCL | TypeScript/Python/Java/C# |
+| **Cloud Support** | AWS Only | Multi-cloud | AWS Only |
+| **State Management** | AWS Managed | Manual/Remote | CloudFormation |
+| **Learning Curve** | Medium | Medium-High | High |
+| **Community** | AWS Ecosystem | Large Multi-cloud | Growing AWS |
+| **Cost** | Free | Free (Open Source) | Free |
+| **IDE Support** | Basic | Good | Excellent |
+| **Testing** | Limited | Good | Excellent |
+
+### When to Use Each Tool
+
+#### Use CloudFormation When:
+- Working exclusively with AWS
+- Need native AWS integration
+- Want AWS-managed state
+- Team prefers declarative YAML/JSON
+- Compliance requires AWS-native tools
+
+#### Use Terraform When:
+- Multi-cloud or hybrid cloud strategy
+- Need advanced state management
+- Want large ecosystem of providers
+- Team comfortable with HCL syntax
+- Need complex dependency management
+
+#### Use CDK When:
+- Team has strong programming background
+- Want to leverage programming language features
+- Need complex logic in infrastructure code
+- Want excellent IDE support and testing
+- Building reusable construct libraries
+
+## 🔍 IaC Best Practices Covered
+
+### Design Principles
+- **Immutable Infrastructure**: Replace rather than modify
+- **Version Control**: All infrastructure code in Git
+- **Modular Design**: Reusable components and modules
+- **Environment Parity**: Consistent across dev/staging/prod
+- **Documentation**: Self-documenting infrastructure code
+
+### Security Practices
+- **Least Privilege**: Minimal required permissions
+- **Secrets Management**: No hardcoded credentials
+- **Resource Tagging**: Consistent tagging strategy
+- **Network Security**: Proper security group configurations
+- **Compliance**: Automated compliance checking
+
+### Operational Practices
+- **State Management**: Proper state file handling
+- **Change Management**: Review before apply
+- **Rollback Strategies**: Plan for failure scenarios
+- **Monitoring**: Infrastructure change tracking
+- **Cost Management**: Resource lifecycle management
+
+## 🔧 Troubleshooting
+
+### Common IaC Issues
+
+#### CloudFormation
+- **Stack Creation Failures**: Check CloudFormation events and logs
+- **Nested Stack Issues**: Verify parameter passing and dependencies
+- **Drift Detection**: Understand supported resource types
+- **Custom Resource Failures**: Debug Lambda function logs
+
+#### Terraform
+- **State File Corruption**: Use state backup and recovery
+- **Provider Version Conflicts**: Pin provider versions
+- **Resource Dependencies**: Use explicit depends_on when needed
+- **Remote State Locking**: Handle DynamoDB locking issues
+
+#### CDK
+- **Synthesis Errors**: Check TypeScript/Python compilation
+- **Bootstrap Issues**: Ensure CDK bootstrap is complete
+- **Asset Upload Failures**: Verify S3 bucket permissions
+- **Version Mismatches**: Keep CDK CLI and libraries in sync
+
+### Debugging Tools and Commands
+
+```bash
+# CloudFormation
+aws cloudformation describe-stack-events --stack-name <stack-name>
+aws cloudformation validate-template --template-body file://template.yaml
+
+# Terraform
+terraform plan -detailed-exitcode
+terraform state list
+terraform state show <resource>
+terraform refresh
+
+# CDK
+cdk diff
+cdk synth
+cdk doctor
+cdk ls
+```
+
+## 🎓 Certification Relevance
+
+These labs directly address AWS DevOps Professional exam domains:
+
+### Domain 2: Configuration Management and Infrastructure as Code (19%)
+- **2.1**: Determine deployment services based on deployment needs
+- **2.2**: Determine application and infrastructure deployment models
+- **2.3**: Determine how to implement lifecycle hooks on a deployment
+
+### Domain 1: SDLC Automation (22%)
+- **1.1**: Apply concepts required to automate a CI/CD pipeline
+- **1.3**: Apply concepts required to build and deploy artifacts
+- **1.4**: Apply concepts required to automate security checks
+
+### Key Exam Topics Covered
+- Infrastructure as Code principles and best practices
+- CloudFormation advanced features (nested stacks, change sets, drift)
+- Multi-cloud IaC strategies and tool selection
+- State management and infrastructure lifecycle
+- Infrastructure testing and validation
+- Security and compliance automation
+- Cost optimization through infrastructure automation
+
+### Exam Tips
+- **Understand tool trade-offs**: Know when to use each IaC tool
+- **Master CloudFormation**: It's heavily featured on the exam
+- **Know state management**: Especially important for Terraform
+- **Practice troubleshooting**: Common failure scenarios appear on exam
+- **Understand security**: IAM roles, policies, and least privilege
+
+## 📖 Additional Resources
+
+### AWS Documentation
+- [AWS CloudFormation User Guide](https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/)
+- [AWS CDK Developer Guide](https://docs.aws.amazon.com/cdk/v2/guide/)
+- [Infrastructure as Code Best Practices](https://docs.aws.amazon.com/whitepapers/latest/introduction-devops-aws/infrastructure-as-code.html)
+
+### Terraform Resources
+- [Terraform AWS Provider Documentation](https://registry.terraform.io/providers/hashicorp/aws/latest/docs)
+- [Terraform Best Practices](https://www.terraform-best-practices.com/)
+- [Terraform Module Registry](https://registry.terraform.io/)
+
+### Community Resources
+- [AWS Samples - Infrastructure](https://github.com/aws-samples?q=infrastructure)
+- [CDK Patterns](https://cdkpatterns.com/)
+- [Terraform AWS Examples](https://github.com/hashicorp/terraform-provider-aws/tree/main/examples)
+
+### Books and Guides
+- [Infrastructure as Code: Managing Servers in the Cloud](https://www.oreilly.com/library/view/infrastructure-as-code/9781491924334/)
+- [Terraform: Up & Running](https://www.terraformupandrunning.com/)
+- [AWS CDK in Action](https://www.manning.com/books/aws-cdk-in-action)
+
+---
+
+**Ready to master Infrastructure as Code?** Start with the [CloudFormation Lab](cloudformation/lab-guide.md) to build your AWS-native IaC foundation!

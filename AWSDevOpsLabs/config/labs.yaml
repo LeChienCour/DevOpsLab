@@ -1,168 +1,694 @@
 labs:
-  cicd-codepipeline:
-    name: "CodePipeline Multi-Stage Pipeline"
-    description: "Create and manage multi-stage CI/CD pipelines with source, build, test, and deploy stages"
-    category: "cicd"
-    difficulty: "intermediate"
-    duration: 60
-    path: "01-cicd/codepipeline"
-    prerequisites:
-      - "AWS CLI configured"
-      - "CodeCommit repository access"
-      - "Basic CI/CD understanding"
-    estimated_cost: 5.00
-    aws_services:
-      - "CodePipeline"
-      - "CodeBuild"
-      - "CodeCommit"
-      - "S3"
-      - "IAM"
-
   cicd-codebuild:
-    name: "Advanced CodeBuild Projects"
-    description: "Custom build environments, caching strategies, and parallel builds"
-    category: "cicd"
-    difficulty: "intermediate"
-    duration: 45
-    path: "01-cicd/codebuild"
-    prerequisites:
-      - "AWS CLI configured"
-      - "Docker basics"
-      - "Build process understanding"
-    estimated_cost: 3.00
     aws_services:
-      - "CodeBuild"
-      - "ECR"
-      - "CloudWatch"
-      - "IAM"
-
-  cicd-codedeploy:
-    name: "CodeDeploy Deployment Strategies"
-    description: "Deployment strategies for EC2, ECS, and Lambda with rollback scenarios"
-    category: "cicd"
-    difficulty: "advanced"
-    duration: 75
-    path: "01-cicd/codedeploy"
-    prerequisites:
-      - "AWS CLI configured"
-      - "Target deployment environments"
-      - "Application deployment understanding"
-    estimated_cost: 8.00
-    aws_services:
-      - "CodeDeploy"
-      - "EC2"
-      - "ECS"
-      - "Lambda"
-      - "Auto Scaling"
-      - "Load Balancer"
-
-  iac-cloudformation:
-    name: "Advanced CloudFormation Patterns"
-    description: "Nested stacks, custom resources, and advanced CloudFormation features"
-    category: "iac"
-    difficulty: "advanced"
-    duration: 90
-    path: "02-iac/cloudformation"
-    prerequisites:
-      - "AWS CLI configured"
-      - "CloudFormation basics"
-      - "JSON/YAML understanding"
-    estimated_cost: 10.00
-    aws_services:
-      - "CloudFormation"
-      - "Lambda"
-      - "EC2"
-      - "VPC"
-      - "IAM"
-
-  iac-cdk:
-    name: "AWS CDK Infrastructure Projects"
-    description: "Infrastructure as code using AWS CDK with TypeScript and Python"
-    category: "iac"
-    difficulty: "intermediate"
+    - CloudFormation
+    - CloudWatch
+    - CodeBuild
+    - CodeCommit
+    - CodeDeploy
+    - CodePipeline
+    - ECS
+    - IAM
+    - Lambda
+    - Parameter Store
+    - S3
+    - SNS
+    - Secrets Manager
+    - VPC
+    - cloudwatch
+    - codebuild
+    - codecommit
+    - codedeploy
+    - codepipeline
+    - s3
+    category: cicd
+    description: Create and configure AWS CodeBuild projects for automated building
+      and testing of applications. This lab demonstrates essential build automation
+      techniques and integration with CI/CD pipelines as required for AWS DevOps Professional
+      certification.
+    difficulty: advanced
     duration: 60
-    path: "02-iac/cdk"
+    estimated_cost: 2.35
+    name: CodeBuild Lab Guide
+    path: 01-cicd\codebuild
     prerequisites:
-      - "Node.js installed"
-      - "TypeScript or Python knowledge"
-      - "AWS CDK CLI installed"
-    estimated_cost: 7.00
+    - AWS Account with administrative access
+    - AWS CLI installed and configured with appropriate permissions
+    - Basic understanding of build systems (npm, pip, Maven, Docker)
+    - Familiarity with AWS CodeBuild concepts
+    - Text editor for configuration modifications
+  cicd-codedeploy:
     aws_services:
-      - "CloudFormation"
-      - "EC2"
-      - "VPC"
-      - "Lambda"
-      - "IAM"
-
+    - Auto Scaling
+    - CloudFormation
+    - CloudWatch
+    - CodeDeploy
+    - CodePipeline
+    - EC2
+    - ECS
+    - IAM
+    - Lambda
+    - Load balancer
+    - S3
+    - cloudformation
+    - cloudwatch
+    - codedeploy
+    - codepipeline
+    - ec2
+    - ecs
+    - load balancer
+    - s3
+    category: cicd
+    description: Implement basic deployment automation using AWS CodeDeploy for EC2
+      instances with in-place deployment strategies. This lab demonstrates essential
+      deployment automation techniques and integration with CI/CD pipelines as required
+      for AWS DevOps Professional certification.
+    difficulty: advanced
+    duration: 60
+    estimated_cost: 2.35
+    name: CodeDeploy Lab Guide
+    path: 01-cicd\codedeploy
+    prerequisites:
+    - AWS Account with administrative access
+    - AWS CLI installed and configured with appropriate permissions
+    - Basic understanding of EC2 instances
+    - Familiarity with AWS CodeDeploy concepts
+    - Text editor for configuration modifications
+  cicd-codepipeline:
+    aws_services:
+    - CDK
+    - CloudFormation
+    - CloudWatch
+    - CodeBuild
+    - CodeCommit
+    - CodeDeploy
+    - CodePipeline
+    - ECS
+    - EventBridge
+    - IAM
+    - Lambda
+    - S3
+    - SNS
+    - cloudformation
+    - cloudwatch
+    - codebuild
+    - codepipeline
+    - iam
+    - lambda
+    - s3
+    category: cicd
+    description: Create a comprehensive multi-stage CI/CD pipeline using AWS CodePipeline
+      with source, build, test, and deploy stages. This lab demonstrates automated
+      deployment workflows and pipeline orchestration as required for AWS DevOps Professional
+      certification.
+    difficulty: advanced
+    duration: 60
+    estimated_cost: 2.35
+    name: CodePipeline Lab Guide
+    path: 01-cicd\codepipeline
+    prerequisites:
+    - AWS Account with administrative access
+    - AWS CLI installed and configured with appropriate permissions
+    - Familiarity with AWS IAM, S3, and CloudFormation
+    - Text editor for code modifications
+  deployment-blue-green:
+    aws_services:
+    - ALB
+    - API Gateway
+    - Auto Scaling
+    - CloudFormation
+    - CloudWatch
+    - CodeDeploy
+    - CodePipeline
+    - EC2
+    - ECS
+    - IAM
+    - Lambda
+    - Load Balancer
+    - Load balancer
+    - S3
+    - SNS
+    - VPC
+    - cloudwatch
+    - codedeploy
+    - config
+    - ec2
+    - ecs
+    - lambda
+    - load balancer
+    - vpc
+    category: deployment
+    description: Learn how to implement blue-green deployment strategies using AWS
+      services including CodeDeploy, ECS, and Lambda to achieve zero-downtime deployments
+      with automated rollback capabilities. This lab demonstrates how to maintain
+      two identical production environments (blue and green) and switch traffic between
+      them for seamless application updates.
+    difficulty: advanced
+    duration: 60
+    estimated_cost: 2.38
+    name: Blue-Green Deployment Lab Guide
+    path: 05-deployment\blue-green
+    prerequisites:
+    - AWS Account with administrative access
+    - AWS CLI configured with appropriate credentials
+    - Basic understanding of load balancers and target groups
+    - Familiarity with EC2 instances and Auto Scaling Groups
+    - Docker installed locally (for application containerization)
+  deployment-canary:
+    aws_services:
+    - ALB
+    - API Gateway
+    - Auto Scaling
+    - CloudFormation
+    - CloudWatch
+    - CodeDeploy
+    - CodePipeline
+    - EC2
+    - ECS
+    - IAM
+    - Lambda
+    - Load Balancer
+    - SNS
+    - Step Functions
+    - VPC
+    - cloudwatch
+    - codedeploy
+    - codepipeline
+    - ec2
+    - ecs
+    - iam
+    - lambda
+    - load balancer
+    - vpc
+    category: deployment
+    description: Learn how to implement canary deployment strategies using AWS services
+      to gradually roll out new application versions with minimal risk. This lab demonstrates
+      how to route a small percentage of traffic to a new version while monitoring
+      performance and gradually increasing traffic based on success metrics.
+    difficulty: advanced
+    duration: 60
+    estimated_cost: 2.36
+    name: Canary Deployment Lab Guide
+    path: 05-deployment\canary
+    prerequisites:
+    - AWS Account with administrative access
+    - AWS CLI configured with appropriate credentials
+    - Basic understanding of load balancers and target groups
+    - Familiarity with CloudWatch metrics and alarms
+    - Knowledge of Auto Scaling Groups and EC2 instances
+  deployment-rolling:
+    aws_services:
+    - ALB
+    - Auto Scaling
+    - CloudFormation
+    - CloudWatch
+    - CodeDeploy
+    - EC2
+    - ECS
+    - EventBridge
+    - IAM
+    - Lambda
+    - Load Balancer
+    - Load balancer
+    - SNS
+    - VPC
+    - auto scaling
+    - cloudwatch
+    - codedeploy
+    - ec2
+    - ecs
+    - lambda
+    - load balancer
+    - vpc
+    category: deployment
+    description: Learn how to implement rolling deployment strategies using AWS Auto
+      Scaling Groups and Application Load Balancers to update applications with minimal
+      downtime. This lab demonstrates how to gradually replace instances in a deployment
+      while maintaining service availability and monitoring the deployment progress.
+    difficulty: advanced
+    duration: 60
+    estimated_cost: 1.35
+    name: Rolling Deployment Lab Guide
+    path: 05-deployment\rolling
+    prerequisites:
+    - AWS Account with administrative access
+    - AWS CLI configured with appropriate credentials
+    - Basic understanding of Auto Scaling Groups and launch templates
+    - Familiarity with Application Load Balancers and target groups
+    - Knowledge of EC2 instances and health checks
+  iac-cdk:
+    aws_services:
+    - ALB
+    - CDK
+    - CloudFormation
+    - CloudWatch
+    - CodePipeline
+    - EC2
+    - ECS
+    - IAM
+    - Lambda
+    - Load Balancer
+    - S3
+    - VPC
+    - Vpc
+    - alb
+    - cdk
+    - cloudformation
+    - cloudwatch
+    - ec2
+    - ecs
+    - load balancer
+    - vpc
+    category: iac
+    description: Learn how to provision and manage AWS infrastructure using the AWS
+      Cloud Development Kit (CDK) with TypeScript. This lab demonstrates how to use
+      programming languages to define cloud infrastructure as code, create reusable
+      components, and deploy multi-tier applications using modern development practices
+      required for the AWS DevOps Professional certification.
+    difficulty: advanced
+    duration: 60
+    estimated_cost: 2.38
+    name: AWS CDK Lab Guide
+    path: 02-iac\cdk
+    prerequisites:
+    - AWS Account with administrative access
+    - Node.js 18+ and npm installed
+    - AWS CLI installed and configured with appropriate permissions
+    - 'AWS CDK CLI installed: `npm install -g aws-cdk`'
+    - Basic TypeScript knowledge
+    - Text editor or IDE (VS Code recommended)
+  iac-cloudformation:
+    aws_services:
+    - ALB
+    - CDK
+    - CloudFormation
+    - CloudWatch
+    - CodePipeline
+    - Config
+    - EC2
+    - ECS
+    - IAM
+    - Lambda
+    - RDS
+    - S3
+    - VPC
+    - auto scaling
+    - cdk
+    - cloudformation
+    - ec2
+    - iam
+    - lambda
+    - load balancer
+    - s3
+    - vpc
+    category: iac
+    description: Learn advanced AWS CloudFormation techniques by implementing a multi-tier
+      application architecture using nested stacks, change sets, and drift detection.
+      This lab demonstrates infrastructure as code best practices and advanced CloudFormation
+      features required for the AWS DevOps Professional certification.
+    difficulty: advanced
+    duration: 60
+    estimated_cost: 2.37
+    name: CloudFormation Lab Guide
+    path: 02-iac\cloudformation
+    prerequisites:
+    - AWS Account with administrative access
+    - AWS CLI installed and configured with appropriate permissions
+    - Basic understanding of CloudFormation templates and YAML syntax
+    - Familiarity with AWS networking concepts (VPC, subnets, security groups)
+    - Text editor for reviewing CloudFormation templates
   iac-terraform:
-    name: "Terraform AWS Integration"
-    description: "Terraform modules and state management for AWS resources"
-    category: "iac"
-    difficulty: "intermediate"
-    duration: 75
-    path: "02-iac/terraform"
-    prerequisites:
-      - "Terraform installed"
-      - "HCL syntax understanding"
-      - "AWS provider knowledge"
-    estimated_cost: 8.00
     aws_services:
-      - "EC2"
-      - "VPC"
-      - "S3"
-      - "IAM"
-
+    - CDK
+    - CloudFormation
+    - CloudWatch
+    - CodePipeline
+    - EC2
+    - ECS
+    - IAM
+    - Load Balancer
+    - S3
+    - VPC
+    - cdk
+    - cloudformation
+    - config
+    - ec2
+    - ecs
+    - load balancer
+    - s3
+    - vpc
+    category: iac
+    description: Learn how to provision and manage AWS infrastructure using Terraform
+      by implementing a multi-tier application architecture with modular components,
+      remote state management, and multi-environment deployments. This lab demonstrates
+      infrastructure as code best practices and advanced Terraform techniques required
+      for the AWS DevOps Professional certification.
+    difficulty: advanced
+    duration: 60
+    estimated_cost: 2.38
+    name: Terraform Lab Guide
+    path: 02-iac\terraform
+    prerequisites:
+    - AWS Account with administrative access
+    - Terraform CLI installed (version 1.0+)
+    - AWS CLI installed and configured with appropriate permissions
+    - Basic understanding of Infrastructure as Code concepts
+    - Familiarity with HCL (HashiCorp Configuration Language)
+  integration-api-gateway:
+    aws_services:
+    - API Gateway
+    - CloudWatch
+    - IAM
+    - Lambda
+    - iam
+    - lambda
+    category: integration
+    description: Learn how to implement API Gateway integration patterns with Lambda,
+      demonstrating how to build, deploy, and secure RESTful APIs that connect to
+      serverless backends and other AWS services.
+    difficulty: advanced
+    duration: 60
+    estimated_cost: 1.3
+    name: API Gateway Integration Lab Guide
+    path: 06-integration\api-gateway
+    prerequisites:
+    - AWS Account with administrative access
+    - Basic understanding of REST API concepts
+    - Familiarity with JavaScript or Python programming
+    - AWS CLI installed and configured
+  integration-cross-service:
+    aws_services:
+    - API Gateway
+    - CloudWatch
+    - EC2
+    - ECS
+    - IAM
+    - Lambda
+    - SNS
+    - SQS
+    - VPC
+    - X-Ray
+    - sns
+    category: integration
+    difficulty: advanced
+    duration: 60
+    estimated_cost: 1.33
+    name: Cross-Service Communication Lab
+    path: 06-integration\cross-service
+    prerequisites:
+    - AWS CLI configured with appropriate permissions
+    - Basic understanding of microservices architecture
+    - Familiarity with ECS, Lambda, and API Gateway
+    - Understanding of networking concepts (VPC, subnets, security groups)
+  integration-ecs:
+    aws_services:
+    - ALB
+    - Auto Scaling
+    - CloudFormation
+    - CloudWatch
+    - CodePipeline
+    - ECS
+    - IAM
+    - Lambda
+    - Load Balancer
+    - Load balancer
+    - SNS
+    - VPC
+    - X-Ray
+    - cloudformation
+    - cloudwatch
+    - ecs
+    - lambda
+    category: integration
+    difficulty: advanced
+    duration: 60
+    estimated_cost: 2.34
+    name: ECS Orchestration Lab
+    path: 06-integration\ecs
+    prerequisites:
+    - AWS CLI configured with appropriate permissions
+    - Basic understanding of containerization and Docker
+    - Familiarity with ECS, VPC, and Load Balancer concepts
+    - Understanding of CloudWatch metrics and alarms
+  integration-lambda:
+    aws_services:
+    - API Gateway
+    - CloudWatch
+    - EventBridge
+    - IAM
+    - Lambda
+    - S3
+    - SNS
+    - SQS
+    - Step Functions
+    - config
+    - eventbridge
+    - iam
+    - lambda
+    - s3
+    - sns
+    - sqs
+    category: integration
+    description: Learn how to implement serverless integration patterns using AWS
+      Lambda, demonstrating how to build, deploy, and integrate serverless functions
+      with other AWS services to create scalable, event-driven architectures.
+    difficulty: advanced
+    duration: 60
+    estimated_cost: 1.33
+    name: Serverless Integration Patterns Lab Guide
+    path: 06-integration\lambda
+    prerequisites:
+    - AWS Account with administrative access
+    - Basic understanding of serverless concepts
+    - Familiarity with JavaScript or Python programming
+    - AWS CLI installed and configured
+  integration-rds:
+    aws_services:
+    - CloudWatch
+    - EC2
+    - IAM
+    - Lambda
+    - RDS
+    - S3
+    - Secrets Manager
+    - VPC
+    - cloudwatch
+    - config
+    - ec2
+    - iam
+    - lambda
+    - rds
+    - sns
+    - vpc
+    category: integration
+    description: Learn how to implement database integration patterns with AWS RDS,
+      demonstrating how to set up, connect to, and manage relational databases in
+      a secure and scalable manner for application integration.
+    difficulty: advanced
+    duration: 60
+    estimated_cost: 1.35
+    name: Database Integration Lab Guide
+    path: 06-integration\rds
+    prerequisites:
+    - AWS Account with administrative access
+    - Basic understanding of SQL and relational databases
+    - Familiarity with networking concepts (VPC, subnets, security groups)
+    - AWS CLI installed and configured
   monitoring-cloudwatch:
-    name: "CloudWatch Comprehensive Monitoring"
-    description: "Custom metrics, dashboards, and automated alerting"
-    category: "monitoring"
-    difficulty: "intermediate"
-    duration: 50
-    path: "03-monitoring/cloudwatch"
-    prerequisites:
-      - "AWS CLI configured"
-      - "Applications to monitor"
-      - "Basic monitoring concepts"
-    estimated_cost: 4.00
     aws_services:
-      - "CloudWatch"
-      - "SNS"
-      - "Lambda"
-      - "EC2"
-
-  monitoring-xray:
-    name: "X-Ray Distributed Tracing"
-    description: "Implement distributed tracing for microservices applications"
-    category: "monitoring"
-    difficulty: "advanced"
-    duration: 65
-    path: "03-monitoring/xray"
+    - CloudFormation
+    - CloudWatch
+    - EC2
+    - EventBridge
+    - IAM
+    - Lambda
+    - SNS
+    - cloudformation
+    - cloudwatch
+    - config
+    - iam
+    - sns
+    category: monitoring
+    description: Learn to create custom CloudWatch metrics, build comprehensive dashboards,
+      configure intelligent alarms, and implement centralized log aggregation for
+      monitoring AWS resources and applications. This lab demonstrates how to implement
+      effective monitoring strategies using CloudWatch's core features and CloudFormation
+      for infrastructure as code.
+    difficulty: advanced
+    duration: 60
+    estimated_cost: 1.31
+    name: CloudWatch Comprehensive Monitoring Lab Guide
+    path: 03-monitoring\cloudwatch
     prerequisites:
-      - "Microservices understanding"
-      - "Application instrumentation knowledge"
-      - "Distributed systems concepts"
-    estimated_cost: 6.00
-    aws_services:
-      - "X-Ray"
-      - "Lambda"
-      - "ECS"
-      - "API Gateway"
-
+    - AWS Account with administrative access
+    - AWS CLI configured with appropriate credentials
+    - Basic understanding of monitoring and observability concepts
+    - A sample application or EC2 instance to monitor (optional - we'll provide examples)
   monitoring-config:
-    name: "AWS Config Compliance Monitoring"
-    description: "Compliance rules, automated remediation, and governance"
-    category: "monitoring"
-    difficulty: "advanced"
-    duration: 70
-    path: "03-monitoring/config"
-    prerequisites:
-      - "AWS CLI configured"
-      - "Compliance requirements understanding"
-      - "Lambda basics"
-    estimated_cost: 5.00
     aws_services:
-      - "Config"
-      - "Lambda"
-      - "SNS"
-      - "CloudWatch"
-      - "IAM"
+    - CloudFormation
+    - CloudWatch
+    - Config
+    - EC2
+    - IAM
+    - Lambda
+    - S3
+    - SNS
+    - VPC
+    - cloudformation
+    - cloudwatch
+    - config
+    - ec2
+    - s3
+    - sns
+    category: monitoring
+    description: Learn to implement compliance monitoring and automated remediation
+      using AWS Config. This lab demonstrates how to track resource configurations,
+      evaluate compliance against rules, and automatically remediate non-compliant
+      resources to maintain security and governance standards.
+    difficulty: advanced
+    duration: 60
+    estimated_cost: 1.33
+    name: AWS Config Compliance Monitoring Lab Guide
+    path: 03-monitoring\config
+    prerequisites:
+    - AWS Account with administrative access
+    - AWS CLI configured with appropriate credentials
+    - Basic understanding of AWS security and compliance concepts
+    - Familiarity with IAM policies and roles
+    - Understanding of S3 bucket policies and encryption
+    - Basic Python knowledge for custom scripts
+  monitoring-xray:
+    aws_services:
+    - API Gateway
+    - CloudWatch
+    - EC2
+    - ECS
+    - IAM
+    - Lambda
+    - X-Ray
+    - config
+    - iam
+    - lambda
+    category: monitoring
+    description: Learn to implement distributed tracing using AWS X-Ray to monitor
+      and debug microservices applications. This lab demonstrates how to instrument
+      applications, analyze trace data, and identify performance bottlenecks in distributed
+      systems.
+    difficulty: advanced
+    duration: 60
+    estimated_cost: 1.33
+    name: AWS X-Ray Distributed Tracing Lab Guide
+    path: 03-monitoring\xray
+    prerequisites:
+    - AWS Account with administrative access
+    - AWS CLI configured with appropriate credentials
+    - Python 3.7+ or Node.js 14+ installed locally
+    - Basic understanding of microservices architecture
+    - Docker installed (optional, for containerized examples)
+  security-iam:
+    aws_services:
+    - CloudWatch
+    - Config
+    - EC2
+    - IAM
+    - Lambda
+    - S3
+    - SNS
+    - cloudwatch
+    - ec2
+    - iam
+    - s3
+    - sns
+    category: security
+    description: Learn to implement IAM best practices including least-privilege policies,
+      role-based access control, and security monitoring. This lab will guide you
+      through creating secure IAM policies, implementing cross-account access, and
+      setting up IAM monitoring and alerting.
+    difficulty: advanced
+    duration: 60
+    estimated_cost: 1.33
+    name: IAM Best Practices Lab Guide
+    path: 04-security\iam
+    prerequisites:
+    - AWS Account with administrative access
+    - AWS CLI configured with appropriate permissions
+    - Basic understanding of JSON syntax
+    - Familiarity with AWS services (EC2, S3, Lambda)
+  security-scanning:
+    aws_services:
+    - CODECOMMIT
+    - CloudWatch
+    - CodeBuild
+    - CodeCommit
+    - CodePipeline
+    - Config
+    - EC2
+    - IAM
+    - Lambda
+    - S3
+    - SNS
+    - VPC
+    - cloudwatch
+    - codebuild
+    - codecommit
+    - config
+    - ec2
+    - iam
+    - s3
+    - sns
+    - vpc
+    category: security
+    description: Learn to implement comprehensive security scanning in your DevOps
+      pipeline using AWS CodeGuru, Amazon Inspector, and third-party security tools.
+      This lab covers static code analysis, dependency vulnerability scanning, container
+      image scanning, and infrastructure security assessment.
+    difficulty: advanced
+    duration: 60
+    estimated_cost: 2.34
+    name: Security Scanning Lab Guide
+    path: 04-security\scanning
+    prerequisites:
+    - AWS Account with administrative access
+    - AWS CLI configured with appropriate permissions
+    - Docker installed locally
+    - Git repository with sample application code
+    - Basic understanding of CI/CD pipelines and security concepts
+    - Node.js or Python development environment
+  security-secrets:
+    aws_services:
+    - CloudWatch
+    - Config
+    - EC2
+    - ECS
+    - IAM
+    - Lambda
+    - Parameter Store
+    - RDS
+    - SNS
+    - Secrets Manager
+    - VPC
+    - cloudwatch
+    - ec2
+    - ecs
+    - iam
+    - lambda
+    - rds
+    - sns
+    - vpc
+    category: security
+    description: Learn to securely manage application secrets using AWS Secrets Manager
+      and Systems Manager Parameter Store. This lab covers storing, retrieving, and
+      rotating secrets in a DevOps pipeline, implementing secure secret access patterns,
+      and integrating secrets management with containerized applications.
+    difficulty: advanced
+    duration: 60
+    estimated_cost: 1.35
+    name: Secrets Management Lab Guide
+    path: 04-security\secrets
+    prerequisites:
+    - AWS Account with administrative access
+    - AWS CLI configured with appropriate permissions
+    - Docker installed locally
+    - Basic understanding of containerization and databases
+    - Familiarity with AWS Lambda and ECS/Fargate
