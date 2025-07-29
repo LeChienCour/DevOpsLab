@@ -1,0 +1,40 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Inter-service communication patterns using SQS and SNS for decoupled messaging'
+
+Parameters:
+  ServicePrefix:
+    Type: String
+    Default: 'cross-service-comm'
+    Description: 'Prefix for service resources'
+
+Resources:
+  # SNS Topics for different communication patterns
+  OrderEventsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub '${ServicePrefix}-order-events'
+      DisplayName: 'Order Events Topic'
+      DeliveryStatusLogging:
+        - Protocol: sqs
+          SuccessFeedbackRoleArn: !GetAtt SNSLoggingRole.Arn
+          FailureFeedbackRoleArn: !GetAtt SNSLoggingRole.Arn
+
+  NotificationsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub '${ServicePrefix}-notifications'
+      DisplayName: 'Notifications Topic'
+      DeliveryStatusLogging:
+        - Protocol: sqs
+          SuccessFeedbackRoleArn: !GetAtt SNSLoggingRole.Arn
+          FailureFeedbackRoleArn: !GetAtt SNSLoggingRole.Arn
+
+  SystemEventsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub '${ServicePrefix}-system-events'
+      DisplayName: 'System Events Topic'
+      DeliveryStatusLogging:
+        - Protocol: sqs
+          SuccessFeedbackRoleArn: !GetAtt SNSLoggingRole.Arn
+          FailureFeedbackRoleArn: !GetAt
