@@ -10,10 +10,6 @@ permissions:
     owner: apache
     group: apache
     mode: 644
-  - object: /var/www/html
-    owner: apache
-    group: apache
-    mode: 755
 hooks:
   BeforeInstall:
     - location: scripts/install_dependencies.sh

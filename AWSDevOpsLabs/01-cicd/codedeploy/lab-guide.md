@@ -218,8 +218,6 @@ This lab creates a simple deployment environment using free tier resources:
    echo $ARTIFACT_BUCKET
    echo $EC2_APP
    echo $DEPLOYMENT_GROUP
-
-   #IMPROVE THE INSTALL DEPENDENCIES its configuring things that are not installed
    
    # Upload to S3
    aws s3 cp updated-app-deployment.zip "s3://$ARTIFACT_BUCKET/"
@@ -279,13 +277,7 @@ This lab creates a simple deployment environment using free tier resources:
    aws s3 cp broken-app-deployment.zip "s3://$ARTIFACT_BUCKET/"
    
    # Deploy with auto-rollback enabled
-   BROKEN_DEPLOYMENT_ID=$(aws deploy create-deployment \
-     --application-name "$EC2_APP" \
-     --deployment-group-name "$DEPLOYMENT_GROUP" \
-     --s3-location bucket="$ARTIFACT_BUCKET",key=broken-app-deployment.zip,bundleType=zip \
-     --auto-rollback-configuration enabled=true,events=DEPLOYMENT_FAILURE,DEPLOYMENT_STOP_ON_ALARM \
-     --query 'deploymentId' \
-     --output text)
+   BROKEN_DEPLOYMENT_ID=$(aws deploy create-deployment --application-name "$EC2_APP" --deployment-group-name "$DEPLOYMENT_GROUP" --s3-location bucket="$ARTIFACT_BUCKET",key=broken-app-deployment.zip,bundleType=zip --auto-rollback-configuration enabled=true,events=DEPLOYMENT_FAILURE,DEPLOYMENT_STOP_ON_ALARM --query 'deploymentId' --output text)
    
    echo "Broken Deployment (will rollback): $BROKEN_DEPLOYMENT_ID"
    ```
@@ -293,7 +285,18 @@ This lab creates a simple deployment environment using free tier resources:
 3. **Monitor the rollback:**
    ```bash
    # Watch the deployment fail and rollback
-   watch -n 15 "aws deploy get-deployment --deployment-id $BROKEN_DEPLOYMENT_ID --query 'deploymentInfo.[status,errorInformation.message]' --output table"
+   while true; do
+   STATUS=$(aws deploy get-deployment --deployment-id "$BROKEN_DEPLOYMENT_ID" --query 'deploymentInfo.status' --output text)
+   echo "$(date): Deployment Status: $STATUS"
+   
+   if [ "$STATUS" = "Failed" ] || [ "$STATUS" = "Succeeded" ] || [ "$STATUS" = "Stopped" ]; then
+      echo "Deployment completed with status: $STATUS"
+      aws deploy get-deployment --deployment-id "$BROKEN_DEPLOYMENT_ID" --query 'deploymentInfo.[status,errorInformation.message]' --output table
+      break
+   fi
+   
+   sleep 15
+   done
    ```
    
    Expected output after failure:
@@ -311,49 +314,32 @@ This lab creates a simple deployment environment using free tier resources:
 
 1. **Analyze deployment performance:**
    ```bash
+   ARTIFACT_BUCKET=$(grep "Artifact Bucket:" lab-session-info.txt | cut -d' ' -f4)
+   EC2_APP=$(grep "EC2 Application:" lab-session-info.txt | cut -d' ' -f4)
+   DEPLOYMENT_GROUP=$(grep "Deployment Group:" lab-session-info.txt | cut -d' ' -f4)
+
    # Get deployment statistics
-   aws deploy list-deployments \
-     --application-name "$EC2_APP" \
-     --query 'deployments[0:5]' \
-     --output table
+   aws deploy list-deployments --application-name "$EC2_APP" --deployment-group-name "$DEPLOYMENT_GROUP" --query 'deployments[0:5]' --output table
    
    # Get detailed deployment info
-   aws deploy batch-get-deployments \
-     --deployment-ids "$DEPLOYMENT_ID" \
-     --query 'deploymentsInfo[*].[deploymentId,status,startTime,completeTime]' \
-     --output table
+   aws deploy batch-get-deployments --deployment-ids "$DEPLOYMENT_ID" --query 'deploymentsInfo[*].[deploymentId,status,startTime,completeTime]' --output table
    ```
 
 2. **Review deployment logs:**
    ```bash
    # Get deployment events
-   aws deploy list-deployment-instances \
-     --deployment-id "$DEPLOYMENT_ID"
+   aws deploy list-deployment-instances --deployment-id "$DEPLOYMENT_ID"
    
    # Check instance deployment status
-   INSTANCE_ID=$(aws ec2 describe-instances \
-     --filters "Name=tag:Project,Values=codedeploy-lab" \
-     --query 'Reservations[0].Instances[0].InstanceId' \
-     --output text)
+   INSTANCE_ID=$(aws ec2 describe-instances --filters "Name=tag:Project,Values=codedeploy-lab" --query 'Reservations[0].Instances[0].InstanceId' --output text)
    
-   aws deploy get-deployment-instance \
-     --deployment-id "$DEPLOYMENT_ID" \
-     --instance-id "$INSTANCE_ID"
+   aws deploy get-deployment-instance --deployment-id "$DEPLOYMENT_ID" --instance-id "$INSTANCE_ID"
    ```
 
 3. **Set up basic monitoring:**
    ```bash
    # Create alarm for deployment failures
-   aws cloudwatch put-metric-alarm \
-     --alarm-name "CodeDeploy-Lab-Failures" \
-     --alarm-description "Alert on CodeDeploy failures" \
-     --metric-name "FailedDeployments" \
-     --namespace "AWS/CodeDeploy" \
-     --statistic "Sum" \
-     --period 300 \
-     --threshold 1 \
-     --comparison-operator "GreaterThanOrEqualToThreshold" \
-     --evaluation-periods 1
+   aws cloudwatch put-metric-alarm --alarm-name "CodeDeploy-Lab-Failures" --alarm-description "Alert on CodeDeploy failures" --metric-name "FailedDeployments" --namespace "AWS/CodeDeploy" --statistic "Sum" --period 300 --threshold 1 --comparison-operator "GreaterThanOrEqualToThreshold" --evaluation-periods 1
    ```
 
 ## Troubleshooting Guide
@@ -608,28 +594,18 @@ After completing this lab, consider:
 ### Supplementary Learning Resources
 
 #### Blog Posts and Articles
-- [AWS DevOps Blog: Zero-Downtime Deployments](https://aws.amazon.com/blogs/devops/practicing-continuous-integration-and-continuous-delivery-on-aws/) - Advanced deployment strategies
 - [AWS Architecture Blog: Multi-Region Deployments](https://aws.amazon.com/blogs/architecture/disaster-recovery-dr-architecture-on-aws-part-i-strategies-for-recovery-in-the-cloud/) - Cross-region deployment patterns
 - [AWS Compute Blog: Container Deployments](https://aws.amazon.com/blogs/compute/deploying-applications-to-amazon-ecs-using-aws-codedeploy/) - ECS deployment strategies
-- [AWS Security Blog: Secure Deployments](https://aws.amazon.com/blogs/security/how-to-secure-your-cicd-pipeline/) - Security considerations for deployments
 
 #### Video Tutorials and Webinars
 - [AWS re:Invent: Advanced Deployment Strategies](https://www.youtube.com/results?search_query=aws+reinvent+codedeploy) - Latest deployment techniques
 - [AWS Online Tech Talks: Blue/Green Deployments](https://www.youtube.com/results?search_query=aws+blue+green+deployment) - Zero-downtime deployment strategies
-- [A Cloud Guru: AWS CodeDeploy Mastery](https://acloudguru.com/course/aws-codedeploy-deep-dive) - Comprehensive deployment training
-- [Pluralsight: AWS DevOps Engineering](https://www.pluralsight.com/courses/aws-devops-engineering-systems-operations) - Complete DevOps workflow
 
 #### Whitepapers and Technical Guides
 - [AWS Whitepaper: Blue/Green Deployments on AWS](https://docs.aws.amazon.com/whitepapers/latest/blue-green-deployments/welcome.html) - Comprehensive deployment strategy guide
 - [AWS Whitepaper: DevOps and Continuous Delivery](https://docs.aws.amazon.com/whitepapers/latest/introduction-devops-aws/introduction-devops-aws.html) - DevOps implementation patterns
 - [AWS Whitepaper: Disaster Recovery](https://docs.aws.amazon.com/whitepapers/latest/disaster-recovery-workloads-on-aws/disaster-recovery-workloads-on-aws.html) - Recovery and rollback strategies
 - [AWS Well-Architected Framework: Reliability](https://docs.aws.amazon.com/wellarchitected/latest/reliability-pillar/welcome.html) - Reliable deployment practices
-
-#### Third-Party Resources
-- [Kubernetes vs CodeDeploy Comparison](https://kubernetes.io/docs/concepts/workloads/controllers/deployment/) - Container orchestration alternatives
-- [Ansible vs CodeDeploy Integration](https://docs.ansible.com/ansible/latest/collections/amazon/aws/aws_codedeploy_module.html) - Configuration management integration
-- [Spinnaker with AWS Integration](https://spinnaker.io/setup/install/providers/aws/) - Advanced deployment orchestration
-- [GitOps with CodeDeploy Patterns](https://www.weave.works/technologies/gitops/) - Git-driven deployment workflows
 
 ## AWS DevOps Professional Certification Relevance
 

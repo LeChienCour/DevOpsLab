@@ -8,6 +8,15 @@ set -e
 echo "Starting BeforeInstall hook..."
 echo "Timestamp: $(date)"
 
+# Remove existing files to prevent deployment conflicts
+echo "Removing existing files from /var/www/html..."
+if [ -d "/var/www/html" ]; then
+    rm -rf /var/www/html/*
+    echo "Existing files removed successfully"
+else
+    echo "Directory /var/www/html does not exist, will be created later..."
+fi
+
 # Update system packages
 echo "Updating system packages..."
 yum update -y
@@ -78,6 +87,9 @@ chown apache:apache /var/log/httpd/codedeploy_*.log
 
 # Install CloudWatch agent configuration
 echo "Configuring CloudWatch agent..."
+# Create CloudWatch agent directory if it doesn't exist
+mkdir -p /opt/aws/amazon-cloudwatch-agent/etc
+
 cat > /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json << 'EOF'
 {
     "logs": {
@@ -106,12 +118,16 @@ cat > /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json << 'EOF'
 }
 EOF
 
-# Start CloudWatch agent
-/opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
-    -a fetch-config \
-    -m ec2 \
-    -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json \
+# Start CloudWatch agent if available
+if [ -f "/opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl" ]; then
+    /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
+        -a fetch-config \
+        -m ec2 \
+        -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json \
     -s || true
+else
+    echo "CloudWatch agent not found, skipping configuration"
+fi
 
 echo "BeforeInstall hook completed successfully"
 echo "Timestamp: $(date)"
