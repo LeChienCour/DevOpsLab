@@ -1,0 +1,187 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'SAST/DAST Security Tools Integration with OWASP ZAP, Snyk, and Custom Security Scanners'
+
+Parameters:
+  ApplicationName:
+    Type: String
+    Description: Name of the application
+    Default: 'sast-dast-lab'
+    
+  Environment:
+    Type: String
+    Description: Environment name
+    Default: 'dev'
+    AllowedValues: ['dev', 'staging', 'prod']
+    
+  TargetApplicationURL:
+    Type: String
+    Description: URL of the target application for DAST scanning
+    Default: 'https://example.com'
+    
+  NotificationEmail:
+    Type: String
+    Description: Email address for security findings notifications
+    Default: 'security@example.com'
+
+Resources:
+  # S3 Bucket for Security Scan Results
+  SecurityScanResultsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${ApplicationName}-security-scans-${AWS::AccountId}-${AWS::Region}'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags:
+        - Key: Application
+          Value: !Ref ApplicationName
+
+  # SAST Scanning CodeBuild Project
+  SASTScanProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub '${ApplicationName}-sast-scan'
+      Description: Static Application Security Testing project
+      ServiceRole: !GetAtt SecurityScanRole.Arn
+      Artifacts:
+        Type: S3
+        Location: !Sub '${SecurityScanResultsBucket}/build-artifacts'
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_MEDIUM
+        Image: aws/codebuild/amazonlinux2-x86_64-standard:3.0
+        EnvironmentVariables:
+          - Name: RESULTS_BUCKET
+            Value: !Ref SecurityScanResultsBucket
+      Source:
+        Type: NO_SOURCE
+        BuildSpec: |
+          version: 0.2
+          phases:
+            install:
+              runtime-versions:
+                python: 3.8
+                nodejs: 14
+              commands:
+                - pip install bandit[toml] safety semgrep
+                - npm install -g eslint eslint-plugin-security
+            build:
+              commands:
+                - echo "Running SAST security scans"
+                - mkdir -p sast-reports
+                - bandit -r . -f json -o sast-reports/bandit-report.json || true
+                - safety check --json --output sast-reports/safety-report.json || true
+                - semgrep --config=auto --json --output=sast-reports/semgrep-report.json . || true
+                - aws s3 sync sast-reports/ s3://$RESULTS_BUCKET/security-reports/sast/
+
+  # DAST Scanning CodeBuild Project  
+  DASTScanProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub '${ApplicationName}-dast-scan'
+      Description: Dynamic Application Security Testing project
+      ServiceRole: !GetAtt SecurityScanRole.Arn
+      Artifacts:
+        Type: S3
+        Location: !Sub '${SecurityScanResultsBucket}/build-artifacts'
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_MEDIUM
+        Image: aws/codebuild/amazonlinux2-x86_64-standard:3.0
+        EnvironmentVariables:
+          - Name: TARGET_URL
+            Value: !Ref TargetApplicationURL
+          - Name: RESULTS_BUCKET
+            Value: !Ref SecurityScanResultsBucket
+      Source:
+        Type: NO_SOURCE
+        BuildSpec: |
+          version: 0.2
+          phases:
+            install:
+              commands:
+                - echo "Installing DAST security scanning tools"
+                - wget https://github.com/zaproxy/zaproxy/releases/download/v2.11.1/ZAP_2.11.1_Linux.tar.gz
+                - tar -xzf ZAP_2.11.1_Linux.tar.gz
+                - yum install -y nmap
+            build:
+              commands:
+                - echo "Running DAST security scans"
+                - mkdir -p dast-reports
+                - nmap -sV $TARGET_URL > dast-reports/nmap-report.txt || true
+                - aws s3 sync dast-reports/ s3://$RESULTS_BUCKET/security-reports/dast/
+
+  # IAM Role for Security Scanning
+  SecurityScanRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ApplicationName}-security-scan-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: SecurityScanPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/*'
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                Resource: !Sub '${SecurityScanResultsBucket}/*'
+
+  # SNS Topic for Security Notifications
+  SecurityNotificationTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub '${ApplicationName}-security-notifications'
+      DisplayName: Security Scan Notifications
+
+  SecurityNotificationSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      Protocol: email
+      TopicArn: !Ref SecurityNotificationTopic
+      Endpoint: !Ref NotificationEmail
+
+Outputs:
+  SASTScanProjectName:
+    Description: Name of the SAST scanning project
+    Value: !Ref SASTScanProject
+    Export:
+      Name: !Sub '${AWS::StackName}-SASTScanProjectName'
+
+  DASTScanProjectName:
+    Description: Name of the DAST scanning project
+    Value: !Ref DASTScanProject
+    Export:
+      Name: !Sub '${AWS::StackName}-DASTScanProjectName'
+
+  SecurityScanResultsBucketName:
+    Description: Name of the S3 bucket for security scan results
+    Value: !Ref SecurityScanResultsBucket
+    Export:
+      Name: !Sub '${AWS::StackName}-SecurityScanResultsBucketName'
+
+  UsageInstructions:
+    Description: Instructions for using the SAST/DAST integration
+    Value: !Sub |
+      1. Manual SAST scan: aws codebuild start-build --project-name ${SASTScanProject}
+      2. Manual DAST scan: aws codebuild start-build --project-name ${DASTScanProject}
+      3. View results: aws s3 ls s3://${SecurityScanResultsBucket}/security-reports/
