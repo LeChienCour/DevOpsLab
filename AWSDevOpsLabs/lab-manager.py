@@ -642,7 +642,7 @@ class LabManager:
         print(f"Lab guide: {lab_info['path']}/lab-guide.md")
         print(f"Estimated cost: ${lab_info['estimated_cost']:.2f}")
         print(f"Resource tags: {session['resource_tags']}")
-        print("\nIMPORTANT: Tag all AWS resources with the provided tags for proper tracking!")
+        print("\nNOTE: Use these tags when creating resources to enable cleanup tracking.")
         print("Remember to run cleanup when finished!")
         
         return True

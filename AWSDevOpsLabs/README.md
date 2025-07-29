@@ -175,10 +175,10 @@ python lab-manager.py list
 python lab-manager.py check-prereqs
 
 # 2. Estimate costs
-python lab-manager.py estimate codepipeline-basic
+python lab-manager.py estimate code-pipeline
 
 # 3. Start the lab
-python lab-manager.py start codepipeline-basic
+python lab-manager.py start code-pipeline
 
 # 4. Follow the lab guide
 # Open: 01-cicd/codepipeline/lab-guide.md
@@ -194,9 +194,6 @@ python lab-manager.py cleanup <session-id>
 ```bash
 # List all available labs
 python lab-manager.py list
-
-# Show lab details
-python lab-manager.py info <lab-id>
 
 # Start a lab session
 python lab-manager.py start <lab-id>
