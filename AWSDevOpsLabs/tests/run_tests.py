@@ -144,7 +144,8 @@ class TestRunner:
             
             # Collect error messages
             for test, error in result.failures + result.errors:
-                suite_result["errors"].append(f"{test}: {error.split('\\n')[0]}")
+                error_lines = error.split('\n')
+                suite_result["errors"].append(f"{test}: {error_lines[0]}")
             
             return suite_result
             

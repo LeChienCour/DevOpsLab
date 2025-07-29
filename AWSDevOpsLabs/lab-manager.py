@@ -17,6 +17,14 @@ from typing import Dict, List, Optional, Tuple
 import boto3
 from botocore.exceptions import ClientError, NoCredentialsError
 
+# Import simple pricing helper
+try:
+    from scripts.simple_pricing import SimplePricingHelper, get_cost_breakdown, format_pricing_info
+    PRICING_AVAILABLE = True
+except ImportError as e:
+    print(f"Warning: Simple pricing helper not available: {e}")
+    PRICING_AVAILABLE = False
+
 class LabManager:
     def __init__(self):
         self.base_dir = Path(__file__).parent
@@ -34,6 +42,9 @@ class LabManager:
         
         # Initialize AWS clients
         self._init_aws_clients()
+        
+        # Initialize pricing analysis components
+        self._init_pricing_components()
     
     def _init_aws_clients(self):
         """Initialize AWS clients for resource tracking."""
@@ -50,6 +61,18 @@ class LabManager:
         except (NoCredentialsError, ClientError) as e:
             print(f"Warning: AWS credentials not configured properly: {e}")
             self.aws_available = False
+    
+    def _init_pricing_components(self):
+        """Initialize simple pricing helper."""
+        if PRICING_AVAILABLE:
+            try:
+                self.pricing_helper = SimplePricingHelper()
+                self.pricing_available = True
+            except Exception as e:
+                print(f"Warning: Could not initialize pricing helper: {e}")
+                self.pricing_available = False
+        else:
+            self.pricing_available = False
 
     def _load_sessions(self) -> Dict:
         """Load lab sessions from file."""
@@ -71,7 +94,15 @@ class LabManager:
         
         try:
             with open(self.labs_config, 'r') as f:
-                return yaml.safe_load(f)
+                config = yaml.safe_load(f)
+                
+                # Always recalculate estimated costs using improved logic
+                for lab_id, lab_info in config.get('labs', {}).items():
+                    services = lab_info.get('aws_services', [])
+                    duration = lab_info.get('duration', 60)
+                    lab_info['estimated_cost'] = self._estimate_lab_cost(services, duration)
+                
+                return config
         except (FileNotFoundError, yaml.YAMLError):
             return self._discover_labs()
     
@@ -179,11 +210,8 @@ class LabManager:
             # Estimate cost based on services and duration
             metadata["estimated_cost"] = self._estimate_lab_cost(metadata["aws_services"], metadata["duration"])
             
-            # Determine difficulty
-            if any(word in content.lower() for word in ['advanced', 'complex', 'nested', 'custom']):
-                metadata["difficulty"] = "advanced"
-            elif any(word in content.lower() for word in ['basic', 'simple', 'introduction']):
-                metadata["difficulty"] = "beginner"
+            # Determine difficulty based on multiple factors
+            metadata["difficulty"] = self._determine_lab_difficulty(content, metadata["aws_services"], metadata["duration"])
             
             return metadata
             
@@ -193,35 +221,114 @@ class LabManager:
 
     def _estimate_lab_cost(self, aws_services: List[str], duration_minutes: int) -> float:
         """Estimate lab cost based on AWS services and duration."""
-        # Base cost estimates per service per hour
+        duration_hours = duration_minutes / 60
+        
+        # Use simple pricing helper if available
+        if self.pricing_available:
+            try:
+                cost_data = get_cost_breakdown(aws_services, duration_hours)
+                return cost_data['standard_cost']
+            except Exception as e:
+                print(f"Warning: Could not get pricing data, using fallback: {str(e)}")
+        
+        # Simple fallback calculation
         service_costs = {
-            'EC2': 0.0104,  # t3.micro
-            'ECS': 0.02,
-            'Lambda': 0.0001,
-            'RDS': 0.017,
-            'S3': 0.023,
-            'CloudWatch': 0.30,
-            'CodeBuild': 0.005,
-            'CodePipeline': 1.0,
-            'API Gateway': 0.0035,
-            'Load Balancer': 0.0225,
-            'NAT Gateway': 0.045
+            'EC2': 0.0104, 'ECS': 0.02, 'Lambda': 0.0001, 'RDS': 0.017,
+            'S3': 0.023, 'CloudWatch': 0.30, 'CodeBuild': 0.005,
+            'CodePipeline': 1.0, 'API Gateway': 0.0035
         }
         
-        duration_hours = duration_minutes / 60
-        total_cost = 0.0
-        
-        for service in aws_services:
-            if service in service_costs:
-                total_cost += service_costs[service] * duration_hours
-        
-        # Add base infrastructure cost
-        total_cost += 1.0
-        
-        return round(total_cost, 2)
+        total_cost = sum(service_costs.get(service, 0.01) * duration_hours for service in aws_services)
+        return round(total_cost + 1.0, 2)  # Add base cost
     
-    def list_labs(self, category: Optional[str] = None, detailed: bool = False):
-        """List available labs with optional detailed information."""
+    def _determine_lab_difficulty(self, content: str, aws_services: List[str], duration_minutes: int) -> str:
+        """Determine lab difficulty based on multiple factors."""
+        difficulty_score = 0
+        content_lower = content.lower()
+        
+        # Content-based difficulty indicators
+        advanced_keywords = [
+            'advanced', 'complex', 'nested', 'custom', 'multi-tier', 'enterprise',
+            'production-grade', 'scalable', 'high-availability', 'disaster recovery',
+            'cross-region', 'multi-account', 'service mesh', 'microservices',
+            'kubernetes', 'helm', 'terraform modules', 'custom resources'
+        ]
+        
+        intermediate_keywords = [
+            'intermediate', 'moderate', 'integration', 'automation', 'pipeline',
+            'deployment', 'monitoring', 'logging', 'security', 'networking',
+            'load balancer', 'auto scaling', 'database', 'caching'
+        ]
+        
+        beginner_keywords = [
+            'basic', 'simple', 'introduction', 'getting started', 'fundamentals',
+            'hello world', 'tutorial', 'walkthrough', 'first steps', 'beginner'
+        ]
+        
+        # Score based on keywords
+        for keyword in advanced_keywords:
+            if keyword in content_lower:
+                difficulty_score += 3
+        
+        for keyword in intermediate_keywords:
+            if keyword in content_lower:
+                difficulty_score += 2
+        
+        for keyword in beginner_keywords:
+            if keyword in content_lower:
+                difficulty_score -= 1
+        
+        # Service complexity scoring
+        complex_services = [
+            'ECS', 'EKS', 'Fargate', 'Service Mesh', 'App Mesh', 'API Gateway',
+            'Step Functions', 'EventBridge', 'Kinesis', 'EMR', 'Redshift',
+            'ElastiCache', 'DocumentDB', 'Neptune', 'Timestream'
+        ]
+        
+        intermediate_services = [
+            'RDS', 'DynamoDB', 'SQS', 'SNS', 'CodePipeline', 'CodeBuild',
+            'CodeDeploy', 'CloudFormation', 'CDK', 'Systems Manager',
+            'Secrets Manager', 'Parameter Store', 'CloudWatch', 'X-Ray'
+        ]
+        
+        # Score based on services used
+        for service in aws_services:
+            if service in complex_services:
+                difficulty_score += 2
+            elif service in intermediate_services:
+                difficulty_score += 1
+        
+        # Duration-based scoring
+        if duration_minutes > 180:  # > 3 hours
+            difficulty_score += 2
+        elif duration_minutes > 120:  # > 2 hours
+            difficulty_score += 1
+        elif duration_minutes < 60:  # < 1 hour
+            difficulty_score -= 1
+        
+        # Number of services (complexity indicator)
+        service_count = len(aws_services)
+        if service_count > 6:
+            difficulty_score += 2
+        elif service_count > 3:
+            difficulty_score += 1
+        
+        # Prerequisites complexity (if mentioned)
+        if 'prerequisite' in content_lower:
+            prereq_section = content_lower.split('prerequisite')[1][:500]  # Look at next 500 chars
+            if any(word in prereq_section for word in ['experience', 'knowledge', 'familiar']):
+                difficulty_score += 1
+        
+        # Determine final difficulty
+        if difficulty_score >= 8:
+            return "advanced"
+        elif difficulty_score >= 4:
+            return "intermediate"
+        else:
+            return "beginner"
+    
+    def list_labs(self, category: Optional[str] = None, detailed: bool = False, show_pricing: bool = False):
+        """List available labs with optional detailed information and pricing."""
         config = self._load_labs_config()
         labs = config.get("labs", {})
         
@@ -237,7 +344,22 @@ class LabManager:
             print(f"Category: {lab_info['category']}")
             print(f"Difficulty: {lab_info['difficulty']}")
             print(f"Duration: {lab_info['duration']} minutes")
-            print(f"Estimated Cost: ${lab_info['estimated_cost']:.2f}")
+            
+            # Show cost information
+            estimated_cost = lab_info['estimated_cost']
+            print(f"Estimated Cost: ${estimated_cost:.2f}")
+            
+            # Show simple pricing information if requested
+            if show_pricing and self.pricing_available:
+                try:
+                    duration_hours = lab_info.get('duration', 60) / 60.0
+                    services = lab_info.get('aws_services', [])
+                    pricing_summary = format_pricing_info(services, duration_hours)
+                    print(f"  {pricing_summary}")
+                except Exception as e:
+                    print(f"  ❌ Pricing info unavailable: {str(e)}")
+            elif show_pricing:
+                print(f"  💡 Install boto3 for enhanced pricing information")
             
             if detailed:
                 print(f"AWS Services: {', '.join(lab_info.get('aws_services', []))}")
@@ -247,6 +369,85 @@ class LabManager:
             print(f"Description: {lab_info.get('description', 'No description available')}")
             print("-" * 50)
 
+    def show_pricing_analysis(self, lab_id: str):
+        """Show simple pricing analysis for a specific lab."""
+        if not self.pricing_available:
+            print("Simple pricing analysis not available.")
+            return
+        
+        config = self._load_labs_config()
+        labs = config.get("labs", {})
+        
+        if lab_id not in labs:
+            print(f"Lab '{lab_id}' not found.")
+            return
+        
+        lab_info = labs[lab_id]
+        duration_hours = lab_info.get('duration', 60) / 60.0
+        services = lab_info.get('aws_services', [])
+        
+        print(f"\nSimple Pricing Analysis for: {lab_info['name']}")
+        print("=" * 60)
+        print(format_pricing_info(services, duration_hours))
+    
+    def show_free_tier_status(self):
+        """Show basic Free Tier information."""
+        if not self.pricing_available:
+            print("Free Tier information not available.")
+            return
+        
+        helper = self.pricing_helper
+        status = helper.get_free_tier_status()
+        
+        print("\nFree Tier Limits (Monthly)")
+        print("=" * 30)
+        for service, limit in status['limits'].items():
+            print(f"{service}: {limit}")
+        
+        print(f"\n{status['note']}")
+        print(f"💡 {status['recommendation']}")
+    
+    def generate_cost_report(self, output_file: Optional[str] = None):
+        """Generate simple cost report for all labs."""
+        if not self.pricing_available:
+            print("Cost reporting not available.")
+            return
+        
+        config = self._load_labs_config()
+        labs = config.get("labs", {})
+        
+        total_standard_cost = 0.0
+        total_free_tier_cost = 0.0
+        
+        print("\nSimple Cost Report for All Labs")
+        print("=" * 50)
+        
+        for lab_id, lab_info in labs.items():
+            duration_hours = lab_info.get('duration', 60) / 60.0
+            services = lab_info.get('aws_services', [])
+            
+            cost_data = get_cost_breakdown(services, duration_hours)
+            total_standard_cost += cost_data['standard_cost']
+            total_free_tier_cost += cost_data['free_tier_cost']
+            
+            print(f"{lab_id}: ${cost_data['standard_cost']:.4f} (Free Tier: ${cost_data['free_tier_cost']:.4f})")
+        
+        print("-" * 50)
+        print(f"Total Standard Cost: ${total_standard_cost:.4f}")
+        print(f"Total Free Tier Cost: ${total_free_tier_cost:.4f}")
+        print(f"Total Potential Savings: ${total_standard_cost - total_free_tier_cost:.4f}")
+        
+        if output_file:
+            report_data = {
+                'total_standard_cost': total_standard_cost,
+                'total_free_tier_cost': total_free_tier_cost,
+                'total_savings': total_standard_cost - total_free_tier_cost,
+                'generated_at': datetime.now().isoformat()
+            }
+            with open(output_file, 'w') as f:
+                json.dump(report_data, f, indent=2)
+            print(f"Report saved to: {output_file}")
+    
     def discover_labs(self):
         """Force rediscovery of labs and update configuration."""
         print("Discovering labs...")
@@ -254,6 +455,38 @@ class LabManager:
         labs_count = len(config.get("labs", {}))
         print(f"Discovered {labs_count} labs and updated configuration.")
         return config
+    
+    def update_lab_costs(self):
+        """Update cost estimates in the existing labs.yaml file."""
+        if not self.labs_config.exists():
+            print("No labs.yaml file found. Run 'discover' first.")
+            return
+        
+        try:
+            with open(self.labs_config, 'r') as f:
+                config = yaml.safe_load(f)
+            
+            updated_count = 0
+            for lab_id, lab_info in config.get('labs', {}).items():
+                services = lab_info.get('aws_services', [])
+                duration = lab_info.get('duration', 60)
+                old_cost = lab_info.get('estimated_cost', 0)
+                new_cost = self._estimate_lab_cost(services, duration)
+                
+                if abs(old_cost - new_cost) > 0.01:  # Only update if significantly different
+                    lab_info['estimated_cost'] = new_cost
+                    updated_count += 1
+                    print(f"Updated {lab_id}: ${old_cost:.2f} → ${new_cost:.2f}")
+            
+            if updated_count > 0:
+                with open(self.labs_config, 'w') as f:
+                    yaml.dump(config, f, default_flow_style=False, indent=2)
+                print(f"Updated {updated_count} lab cost estimates in labs.yaml")
+            else:
+                print("No cost updates needed.")
+                
+        except Exception as e:
+            print(f"Error updating lab costs: {str(e)}")
 
     def get_resource_inventory(self, session_id: Optional[str] = None) -> Dict:
         """Get inventory of AWS resources, optionally filtered by session."""
@@ -1031,9 +1264,13 @@ def main():
     list_parser = subparsers.add_parser("list", help="List available labs")
     list_parser.add_argument("--category", help="Filter by category")
     list_parser.add_argument("--detailed", action="store_true", help="Show detailed information")
+    list_parser.add_argument("--pricing", action="store_true", help="Show pricing information")
     
     # Discover command
     subparsers.add_parser("discover", help="Rediscover labs and update configuration")
+    
+    # Update costs command
+    subparsers.add_parser("update-costs", help="Update cost estimates in labs.yaml")
     
     # Start command
     start_parser = subparsers.add_parser("start", help="Start a lab")
@@ -1086,6 +1323,17 @@ def main():
     # Certification progress
     subparsers.add_parser("cert-progress", help="Show certification progress")
     
+    # Simple pricing commands
+    pricing_parser = subparsers.add_parser("pricing", help="Simple pricing analysis for a lab")
+    pricing_parser.add_argument("lab_id", help="Lab ID to analyze")
+    
+    # Free Tier info
+    subparsers.add_parser("free-tier", help="Show Free Tier information")
+    
+    # Simple cost report
+    cost_report_parser = subparsers.add_parser("cost-report", help="Generate simple cost report")
+    cost_report_parser.add_argument("--output", help="Output file path")
+    
     args = parser.parse_args()
     
     if not args.command:
@@ -1095,9 +1343,11 @@ def main():
     manager = LabManager()
     
     if args.command == "list":
-        manager.list_labs(args.category, args.detailed)
+        manager.list_labs(args.category, args.detailed, getattr(args, 'pricing', False))
     elif args.command == "discover":
         manager.discover_labs()
+    elif args.command == "update-costs":
+        manager.update_lab_costs()
     elif args.command == "start":
         manager.start_lab(args.lab_id)
     elif args.command == "stop":
@@ -1176,6 +1426,12 @@ def main():
         print(f"  Difficulty: {cert_progress['difficulty']}")
         print(f"  Estimated Cost: ${cert_progress['estimated_cost']:.2f}")
         print(f"  Actual Cost: ${cert_progress['actual_cost']:.2f}")
+    elif args.command == "pricing":
+        manager.show_pricing_analysis(args.lab_id)
+    elif args.command == "free-tier":
+        manager.show_free_tier_status()
+    elif args.command == "cost-report":
+        manager.generate_cost_report(args.output)
     elif args.command == "cert-progress":
         progress = manager.get_certification_progress()
         print("AWS DevOps Certification Progress")

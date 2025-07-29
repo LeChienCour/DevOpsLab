@@ -28,7 +28,7 @@ labs:
       certification.
     difficulty: advanced
     duration: 60
-    estimated_cost: 2.35
+    estimated_cost: 0.3021
     name: CodeBuild Lab Guide
     path: 01-cicd\codebuild
     prerequisites:
@@ -65,7 +65,7 @@ labs:
       for AWS DevOps Professional certification.
     difficulty: advanced
     duration: 60
-    estimated_cost: 2.35
+    estimated_cost: 0.0229
     name: CodeDeploy Lab Guide
     path: 01-cicd\codedeploy
     prerequisites:
@@ -103,7 +103,7 @@ labs:
       certification.
     difficulty: advanced
     duration: 60
-    estimated_cost: 2.35
+    estimated_cost: 0.3041
     name: CodePipeline Lab Guide
     path: 01-cicd\codepipeline
     prerequisites:
@@ -145,7 +145,7 @@ labs:
       them for seamless application updates.
     difficulty: advanced
     duration: 60
-    estimated_cost: 2.38
+    estimated_cost: 0.0248
     name: Blue-Green Deployment Lab Guide
     path: 05-deployment\blue-green
     prerequisites:
@@ -187,7 +187,7 @@ labs:
       performance and gradually increasing traffic based on success metrics.
     difficulty: advanced
     duration: 60
-    estimated_cost: 2.36
+    estimated_cost: 0.0248
     name: Canary Deployment Lab Guide
     path: 05-deployment\canary
     prerequisites:
@@ -227,7 +227,7 @@ labs:
       while maintaining service availability and monitoring the deployment progress.
     difficulty: advanced
     duration: 60
-    estimated_cost: 1.35
+    estimated_cost: 0.0248
     name: Rolling Deployment Lab Guide
     path: 05-deployment\rolling
     prerequisites:
@@ -267,7 +267,7 @@ labs:
       required for the AWS DevOps Professional certification.
     difficulty: advanced
     duration: 60
-    estimated_cost: 2.38
+    estimated_cost: 0.0228
     name: AWS CDK Lab Guide
     path: 02-iac\cdk
     prerequisites:
@@ -308,7 +308,7 @@ labs:
       features required for the AWS DevOps Professional certification.
     difficulty: advanced
     duration: 60
-    estimated_cost: 2.37
+    estimated_cost: 0.0419
     name: CloudFormation Lab Guide
     path: 02-iac\cloudformation
     prerequisites:
@@ -345,7 +345,7 @@ labs:
       for the AWS DevOps Professional certification.
     difficulty: advanced
     duration: 60
-    estimated_cost: 2.38
+    estimated_cost: 0.0209
     name: Terraform Lab Guide
     path: 02-iac\terraform
     prerequisites:
@@ -368,7 +368,7 @@ labs:
       serverless backends and other AWS services.
     difficulty: advanced
     duration: 60
-    estimated_cost: 1.3
+    estimated_cost: 0.004
     name: API Gateway Integration Lab Guide
     path: 06-integration\api-gateway
     prerequisites:
@@ -392,7 +392,7 @@ labs:
     category: integration
     difficulty: advanced
     duration: 60
-    estimated_cost: 1.33
+    estimated_cost: 0.0124
     name: Cross-Service Communication Lab
     path: 06-integration\cross-service
     prerequisites:
@@ -422,7 +422,7 @@ labs:
     category: integration
     difficulty: advanced
     duration: 60
-    estimated_cost: 2.34
+    estimated_cost: 0.004
     name: ECS Orchestration Lab
     path: 06-integration\ecs
     prerequisites:
@@ -454,7 +454,7 @@ labs:
       with other AWS services to create scalable, event-driven architectures.
     difficulty: advanced
     duration: 60
-    estimated_cost: 1.33
+    estimated_cost: 0.0041
     name: Serverless Integration Patterns Lab Guide
     path: 06-integration\lambda
     prerequisites:
@@ -486,7 +486,7 @@ labs:
       a secure and scalable manner for application integration.
     difficulty: advanced
     duration: 60
-    estimated_cost: 1.35
+    estimated_cost: 0.0588
     name: Database Integration Lab Guide
     path: 06-integration\rds
     prerequisites:
@@ -516,7 +516,7 @@ labs:
       for infrastructure as code.
     difficulty: advanced
     duration: 60
-    estimated_cost: 1.31
+    estimated_cost: 0.0124
     name: CloudWatch Comprehensive Monitoring Lab Guide
     path: 03-monitoring\cloudwatch
     prerequisites:
@@ -548,7 +548,7 @@ labs:
       resources to maintain security and governance standards.
     difficulty: advanced
     duration: 60
-    estimated_cost: 1.33
+    estimated_cost: 0.0229
     name: AWS Config Compliance Monitoring Lab Guide
     path: 03-monitoring\config
     prerequisites:
@@ -577,7 +577,7 @@ labs:
       systems.
     difficulty: advanced
     duration: 60
-    estimated_cost: 1.33
+    estimated_cost: 0.0144
     name: AWS X-Ray Distributed Tracing Lab Guide
     path: 03-monitoring\xray
     prerequisites:
@@ -607,7 +607,7 @@ labs:
       setting up IAM monitoring and alerting.
     difficulty: advanced
     duration: 60
-    estimated_cost: 1.33
+    estimated_cost: 0.0229
     name: IAM Best Practices Lab Guide
     path: 04-security\iam
     prerequisites:
@@ -645,7 +645,7 @@ labs:
       image scanning, and infrastructure security assessment.
     difficulty: advanced
     duration: 60
-    estimated_cost: 2.34
+    estimated_cost: 0.3229
     name: Security Scanning Lab Guide
     path: 04-security\scanning
     prerequisites:
@@ -683,7 +683,7 @@ labs:
       and integrating secrets management with containerized applications.
     difficulty: advanced
     duration: 60
-    estimated_cost: 1.35
+    estimated_cost: 0.0588
     name: Secrets Management Lab Guide
     path: 04-security\secrets
     prerequisites:

@@ -1,0 +1,30 @@
+{
+  "lab_id": "cicd-pipeline-lab",
+  "name": "CI/CD Pipeline Lab",
+  "description": "Complete CI/CD pipeline using CodePipeline, CodeBuild, and CodeDeploy",
+  "resources": {
+    "EC2": {
+      "instance_type": "t3.micro",
+      "count": 2,
+      "description": "Application servers for deployment"
+    },
+    "S3": {
+      "storage_gb": 2.0,
+      "get_requests": 5000,
+      "put_requests": 500,
+      "description": "Artifact storage and static website hosting"
+    },
+    "Lambda": {
+      "requests": 50000,
+      "gb_seconds": 2000,
+      "description": "Build notifications and automation functions"
+    },
+    "CodeBuild": {
+      "build_minutes": 60,
+      "description": "Build and test automation"
+    }
+  },
+  "estimated_duration_hours": 3.0,
+  "difficulty": "intermediate",
+  "prerequisites": ["basic-aws-knowledge", "git-fundamentals"]
+}

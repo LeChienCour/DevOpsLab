@@ -1,0 +1,198 @@
+# Completion Criteria for CI/CD CodePipeline Lab
+
+lab_info:
+  id: "cicd-codepipeline"
+  name: "CodePipeline Multi-Stage Pipeline Lab"
+  category: "cicd"
+  estimated_duration: 90  # minutes
+
+# Required AWS Resources
+required_resources:
+  - "cloudformation"
+  - "codepipeline"
+  - "codebuild"
+  - "s3"
+  - "iam"
+
+# Required CloudFormation Stack Outputs
+required_outputs:
+  - "PipelineName"
+  - "S3BucketName"
+  - "CodeBuildProjectName"
+
+# Specific Resource Requirements
+resource_requirements:
+  cloudformation:
+    min_stacks: 1
+    required_stack_status: "CREATE_COMPLETE"
+    required_parameters:
+      - "SessionId"
+      - "LabName"
+    
+  codepipeline:
+    min_pipelines: 1
+    required_stages:
+      - "Source"
+      - "Build"
+      - "Deploy"
+    pipeline_status: "SUCCEEDED"
+    
+  codebuild:
+    min_projects: 1
+    build_status: "SUCCEEDED"
+    required_buildspec: true
+    
+  s3:
+    min_buckets: 1
+    encryption_required: true
+    versioning_enabled: true
+    
+  iam:
+    required_roles:
+      - "CodePipelineServiceRole"
+      - "CodeBuildServiceRole"
+
+# Functional Requirements
+functional_requirements:
+  pipeline_execution:
+    - description: "Pipeline can be triggered manually"
+      validation_method: "api_call"
+      expected_result: "SUCCESS"
+    
+    - description: "Source stage retrieves code successfully"
+      validation_method: "stage_status"
+      stage_name: "Source"
+      expected_status: "Succeeded"
+    
+    - description: "Build stage compiles code successfully"
+      validation_method: "stage_status"
+      stage_name: "Build"
+      expected_status: "Succeeded"
+    
+    - description: "Deploy stage deploys artifacts successfully"
+      validation_method: "stage_status"
+      stage_name: "Deploy"
+      expected_status: "Succeeded"
+
+# Security Requirements
+security_requirements:
+  iam_policies:
+    - description: "CodePipeline role has least privilege permissions"
+      validation_method: "policy_analysis"
+      max_wildcard_actions: 0
+    
+    - description: "CodeBuild role cannot access other AWS accounts"
+      validation_method: "cross_account_check"
+      allowed: false
+  
+  s3_security:
+    - description: "S3 bucket blocks public access"
+      validation_method: "public_access_check"
+      public_access_allowed: false
+    
+    - description: "S3 bucket has server-side encryption"
+      validation_method: "encryption_check"
+      encryption_required: true
+
+# Performance Requirements
+performance_requirements:
+  pipeline_execution_time:
+    max_duration_minutes: 15
+    timeout_action: "warning"
+  
+  build_time:
+    max_duration_minutes: 10
+    timeout_action: "warning"
+
+# Cost Requirements
+cost_requirements:
+  max_hourly_cost: 2.0
+  max_daily_cost: 10.0
+  free_tier_eligible: true
+  
+  cost_breakdown:
+    codepipeline: 1.0  # per active pipeline per month
+    codebuild: 0.005  # per build minute
+    s3: 0.023  # per GB per month
+    data_transfer: 0.09  # per GB
+
+# Cleanup Requirements
+cleanup_requirements:
+  required_cleanup_order:
+    1. "Stop any running pipeline executions"
+    2. "Delete CodePipeline pipeline"
+    3. "Delete CodeBuild project"
+    4. "Empty and delete S3 bucket"
+    5. "Delete IAM roles and policies"
+    6. "Delete CloudFormation stack"
+  
+  cleanup_validation:
+    - resource_type: "codepipeline"
+      expected_count: 0
+    - resource_type: "codebuild"
+      expected_count: 0
+    - resource_type: "s3"
+      expected_count: 0
+
+# Learning Objectives Validation
+learning_objectives:
+  - objective: "Understand CodePipeline stage configuration"
+    validation_method: "resource_inspection"
+    success_criteria: "Pipeline has at least 3 stages configured"
+  
+  - objective: "Implement automated build process"
+    validation_method: "build_execution"
+    success_criteria: "Build completes successfully with artifacts"
+  
+  - objective: "Configure deployment automation"
+    validation_method: "deployment_verification"
+    success_criteria: "Deployment stage completes without errors"
+  
+  - objective: "Implement proper IAM permissions"
+    validation_method: "permission_audit"
+    success_criteria: "All roles follow least privilege principle"
+
+# Troubleshooting Scenarios
+troubleshooting_scenarios:
+  - scenario: "Pipeline fails at source stage"
+    validation_method: "error_simulation"
+    expected_resolution: "Check source repository permissions"
+  
+  - scenario: "Build stage fails with permission error"
+    validation_method: "permission_test"
+    expected_resolution: "Verify CodeBuild service role permissions"
+  
+  - scenario: "Deployment fails due to resource conflicts"
+    validation_method: "resource_conflict_test"
+    expected_resolution: "Check target environment availability"
+
+# Advanced Validation
+advanced_validation:
+  integration_tests:
+    - test_name: "End-to-end pipeline execution"
+      test_method: "trigger_pipeline"
+      success_criteria: "Complete pipeline execution within time limit"
+    
+    - test_name: "Rollback capability"
+      test_method: "deployment_rollback"
+      success_criteria: "Previous version restored successfully"
+  
+  monitoring_validation:
+    - metric_name: "Pipeline success rate"
+      expected_value: "> 90%"
+      time_period: "last_hour"
+    
+    - metric_name: "Build duration"
+      expected_value: "< 10 minutes"
+      time_period: "last_execution"
+
+# Documentation Requirements
+documentation_requirements:
+  required_documentation:
+    - "Pipeline architecture diagram"
+    - "Build process documentation"
+    - "Deployment procedure"
+    - "Troubleshooting guide"
+  
+  validation_method: "file_existence_check"
+  documentation_format: "markdown"

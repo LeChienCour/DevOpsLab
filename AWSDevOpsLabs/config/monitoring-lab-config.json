@@ -1,0 +1,26 @@
+{
+  "lab_id": "monitoring-observability-lab",
+  "name": "Monitoring and Observability Lab",
+  "description": "Comprehensive monitoring setup with CloudWatch, X-Ray, and Config",
+  "resources": {
+    "EC2": {
+      "instance_type": "t3.small",
+      "count": 1,
+      "description": "Application server with monitoring agents"
+    },
+    "Lambda": {
+      "requests": 25000,
+      "gb_seconds": 1500,
+      "description": "Custom metrics collection and alerting functions"
+    },
+    "S3": {
+      "storage_gb": 1.0,
+      "get_requests": 2000,
+      "put_requests": 200,
+      "description": "Log storage and backup"
+    }
+  },
+  "estimated_duration_hours": 2.5,
+  "difficulty": "advanced",
+  "prerequisites": ["aws-cloudwatch-basics", "lambda-fundamentals"]
+}

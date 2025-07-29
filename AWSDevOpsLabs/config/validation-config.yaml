@@ -1,0 +1,313 @@
+# Lab Validation and Health Check Configuration
+
+# Health Check Settings
+health_checks:
+  # CloudFormation Resource Validation
+  cloudformation:
+    enabled: true
+    check_stack_status: true
+    check_drift: true
+    check_nested_stacks: true
+    required_tags:
+      - "Project"
+      - "SessionId"
+      - "LabName"
+      - "ManagedBy"
+    allowed_stack_statuses:
+      - "CREATE_COMPLETE"
+      - "UPDATE_COMPLETE"
+      - "ROLLBACK_COMPLETE"
+    
+  # EC2 Instance Validation
+  ec2:
+    enabled: true
+    check_instance_status: true
+    check_security_groups: true
+    check_key_pairs: true
+    check_instance_profiles: true
+    allowed_instance_types:
+      - "t3.micro"
+      - "t3.small"
+      - "t3.medium"
+      - "t2.micro"
+      - "t2.small"
+      - "t2.medium"
+    allowed_instance_states:
+      - "running"
+      - "stopped"
+      - "stopping"
+    max_instances_per_session: 10
+    
+  # Lambda Function Validation
+  lambda:
+    enabled: true
+    check_function_status: true
+    check_error_rates: true
+    check_timeout_settings: true
+    check_memory_settings: true
+    max_error_rate: 5.0  # percentage
+    max_timeout: 900  # seconds
+    max_memory: 3008  # MB
+    allowed_runtimes:
+      - "python3.8"
+      - "python3.9"
+      - "python3.10"
+      - "python3.11"
+      - "nodejs16.x"
+      - "nodejs18.x"
+    
+  # S3 Bucket Validation
+  s3:
+    enabled: true
+    check_bucket_encryption: true
+    check_public_access: true
+    check_versioning: true
+    check_lifecycle_policies: false
+    require_encryption: true
+    block_public_access: true
+    max_buckets_per_session: 5
+    
+  # IAM Resource Validation
+  iam:
+    enabled: true
+    check_policy_compliance: true
+    check_unused_roles: true
+    check_overprivileged_policies: true
+    check_password_policies: false
+    max_roles_per_session: 10
+    forbidden_actions:
+      - "iam:*"
+      - "*:*"
+    
+  # RDS Database Validation
+  rds:
+    enabled: true
+    check_encryption: true
+    check_backup_settings: true
+    check_multi_az: false
+    check_security_groups: true
+    allowed_instance_classes:
+      - "db.t3.micro"
+      - "db.t3.small"
+      - "db.t2.micro"
+      - "db.t2.small"
+    
+  # ECS Service Validation
+  ecs:
+    enabled: true
+    check_service_status: true
+    check_task_definition: true
+    check_auto_scaling: true
+    check_load_balancer_integration: true
+    max_services_per_session: 5
+    
+  # CloudWatch Monitoring Validation
+  cloudwatch:
+    enabled: true
+    check_log_groups: true
+    check_alarms: true
+    check_dashboards: false
+    log_retention_days: 7
+    max_log_groups_per_session: 10
+
+# Cost Validation Settings
+cost_validation:
+  enabled: true
+  max_hourly_cost: 10.0  # USD
+  max_daily_cost: 50.0   # USD
+  max_monthly_cost: 200.0  # USD
+  alert_threshold: 0.8  # 80% of limit
+  free_tier_tracking: true
+  
+  # Service-specific cost limits
+  service_limits:
+    ec2:
+      max_hourly_cost: 5.0
+      free_tier_hours: 750  # per month
+    lambda:
+      max_monthly_requests: 1000000
+      max_monthly_gb_seconds: 400000
+    s3:
+      max_monthly_storage_gb: 5
+      max_monthly_requests: 20000
+    rds:
+      max_hourly_cost: 3.0
+      free_tier_hours: 750  # per month
+
+# Lab Completion Criteria
+completion_criteria:
+  # General requirements for all labs
+  general:
+    min_resources: 1
+    required_tags:
+      - "Project"
+      - "SessionId"
+      - "LabName"
+    max_completion_time: 7200  # 2 hours in seconds
+    
+  # Resource-specific completion criteria
+  resources:
+    cloudformation:
+      min_stacks: 1
+      required_outputs: []
+      stack_status: "CREATE_COMPLETE"
+    
+    ec2:
+      min_instances: 0
+      required_states: ["running", "stopped"]
+      security_group_rules: "restrictive"
+    
+    lambda:
+      min_functions: 0
+      required_status: "Active"
+      max_error_rate: 5.0
+    
+    s3:
+      min_buckets: 0
+      encryption_required: true
+      public_access_blocked: true
+
+# Security Validation Rules
+security:
+  # Network Security
+  network:
+    check_security_groups: true
+    allow_ssh_from_anywhere: false
+    allow_rdp_from_anywhere: false
+    require_vpc_endpoints: false
+    check_nacls: false
+    
+  # Data Security
+  data:
+    require_encryption_at_rest: true
+    require_encryption_in_transit: true
+    check_kms_key_rotation: false
+    scan_for_secrets: true
+    
+  # Access Control
+  access:
+    check_iam_policies: true
+    require_mfa: false
+    check_resource_policies: true
+    audit_cross_account_access: true
+    
+  # Compliance
+  compliance:
+    cis_benchmarks: false
+    aws_config_rules: true
+    security_hub_findings: false
+
+# Performance Validation
+performance:
+  # Response Time Checks
+  response_times:
+    lambda_cold_start: 5000  # milliseconds
+    api_gateway_response: 2000  # milliseconds
+    
+  # Resource Utilization
+  utilization:
+    max_cpu_utilization: 80  # percentage
+    max_memory_utilization: 80  # percentage
+    
+  # Scaling Checks
+  scaling:
+    check_auto_scaling_policies: true
+    validate_scaling_triggers: true
+
+# Monitoring and Alerting
+monitoring:
+  # CloudWatch Integration
+  cloudwatch:
+    create_dashboards: false
+    create_alarms: true
+    log_retention_days: 7
+    
+  # Custom Metrics
+  custom_metrics:
+    track_lab_progress: true
+    track_resource_usage: true
+    track_costs: true
+    
+  # Alerting
+  alerts:
+    cost_threshold_alerts: true
+    error_rate_alerts: true
+    resource_limit_alerts: true
+
+# Cleanup Validation
+cleanup:
+  # Pre-cleanup Checks
+  pre_cleanup:
+    backup_important_data: false
+    export_configurations: true
+    save_logs: true
+    
+  # Post-cleanup Validation
+  post_cleanup:
+    verify_resource_deletion: true
+    check_orphaned_resources: true
+    validate_cost_reduction: true
+    timeout_seconds: 300
+    
+  # Cleanup Policies
+  policies:
+    force_cleanup_after_hours: 24
+    warn_before_cleanup: true
+    preserve_tagged_resources: false
+
+# Reporting Configuration
+reporting:
+  # Report Formats
+  formats:
+    json: true
+    yaml: true
+    html: false
+    pdf: false
+    
+  # Report Content
+  content:
+    include_recommendations: true
+    include_cost_breakdown: true
+    include_security_findings: true
+    include_performance_metrics: false
+    
+  # Report Distribution
+  distribution:
+    save_to_file: true
+    upload_to_s3: false
+    send_email: false
+    post_to_slack: false
+
+# Integration Settings
+integrations:
+  # AWS Services
+  aws_config: false
+  aws_security_hub: false
+  aws_cost_explorer: false
+  aws_trusted_advisor: false
+  
+  # Third-party Tools
+  terraform: false
+  ansible: false
+  jenkins: false
+  github_actions: true
+
+# Advanced Settings
+advanced:
+  # Parallel Processing
+  parallel_checks: true
+  max_concurrent_checks: 5
+  
+  # Caching
+  cache_results: true
+  cache_duration_minutes: 30
+  
+  # Retry Logic
+  retry_failed_checks: true
+  max_retries: 3
+  retry_delay_seconds: 5
+  
+  # Debugging
+  debug_mode: false
+  verbose_logging: false
+  save_debug_info: false
