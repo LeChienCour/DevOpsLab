@@ -506,6 +506,14 @@ This lab creates a multi-tier application infrastructure using AWS CDK:
          internetFacing: true,
        });
 
+       // Create ECS Service first
+       this.service = new ecs.FargateService(this, 'Service', {
+         cluster,
+         taskDefinition,
+         desiredCount: props.desiredCount,
+         securityGroups: [serviceSecurityGroup],
+         assignPublicIp: false,
+       });
        // Create ALB Listener
        const listener = this.loadBalancer.addListener('Listener', {
          port: 80,
@@ -515,30 +523,13 @@ This lab creates a multi-tier application infrastructure using AWS CDK:
        // Create Target Group
        const targetGroup = listener.addTargets('WebService', {
          port: props.containerPort,
-         targets: [
-           new elbv2.EcsTarget({
-             containerName: 'Container',
-             containerPort: props.containerPort,
-             newTargetGroupId: 'ECS',
-             taskDefinition,
-           }),
-         ],
+         targets: [this.service],
          healthCheck: {
            path: '/',
            interval: cdk.Duration.seconds(60),
            timeout: cdk.Duration.seconds(5),
          },
        });
-
-       // Create ECS Service
-       this.service = new ecs.FargateService(this, 'Service', {
-         cluster,
-         taskDefinition,
-         desiredCount: props.desiredCount,
-         securityGroups: [serviceSecurityGroup],
-         assignPublicIp: false,
-       });
-
        // Allow ALB to access the service
        serviceSecurityGroup.addIngressRule(
          ec2.Peer.anyIpv4(),
@@ -684,8 +675,8 @@ This lab creates a multi-tier application infrastructure using AWS CDK:
 
 1. **Modify the service configuration:**
    ```bash
-   # Update the desired count in the service stack
-   sed -i 's/desiredCount: props.environment === .prod. ? 2 : 1/desiredCount: props.environment === .prod. ? 2 : 2/' lib/service-stack.ts
+   # Update the desired count in the service stack 
+   sed -i "s/desiredCount: props.environment === 'prod' ? 2 : 1/desiredCount: props.environment === 'prod' ? 2 : 2/" lib/service-stack.ts
    ```
    
    > **Note**: On Windows, use a text editor to make this change.
@@ -710,21 +701,38 @@ This lab creates a multi-tier application infrastructure using AWS CDK:
 
 ### Step 8: Clean Up Resources
 
+> **⚠️ Important**: Always clean up resources after completing the lab to avoid unexpected AWS charges. The NAT Gateway and Application Load Balancer are the most expensive components.
+
 1. **Destroy the CDK stacks:**
    ```bash
-   # Destroy all stacks
+   # Destroy all stacks (this will prompt for confirmation)
    cdk destroy --all
    ```
    
-   > **Note**: This command removes all resources created by CDK. It will take approximately 10-15 minutes to complete.
+   You'll see prompts like:
+   ```
+   Are you sure you want to delete: dev-MonitoringStack (y/n)? y
+   Are you sure you want to delete: dev-ServiceStack (y/n)? y  
+   Are you sure you want to delete: dev-NetworkStack (y/n)? y
+   ```
+   
+   > **Note**: This command removes all resources created by CDK. It will take approximately 10-15 minutes to complete. The stacks are deleted in reverse dependency order.
 
-2. **Verify resource cleanup:**
+2. **Alternative: Destroy stacks individually (if needed):**
+   ```bash
+   # Destroy in reverse dependency order
+   cdk destroy dev-MonitoringStack
+   cdk destroy dev-ServiceStack
+   cdk destroy dev-NetworkStack
+   ```
+
+3. **Verify resource cleanup:**
    ```bash
    # Check that stacks have been removed
    aws cloudformation list-stacks --query "StackSummaries[?contains(StackName, 'dev-')].{Name:StackName,Status:StackStatus}"
    ```
    
-   Expected output:
+   Expected output when cleanup is complete:
    ```json
    [
        {
@@ -742,7 +750,71 @@ This lab creates a multi-tier application infrastructure using AWS CDK:
    ]
    ```
 
+4. **Verify no remaining resources in AWS Console:**
+   - **EC2 Dashboard**: Check for any remaining load balancers, target groups, or security groups
+   - **ECS Dashboard**: Verify no clusters, services, or task definitions remain
+   - **VPC Dashboard**: Confirm VPC, subnets, and NAT gateways are deleted
+   - **CloudWatch**: Check for any remaining log groups or dashboards
+
+5. **Clean up CDK bootstrap resources (optional):**
+   ```bash
+   # Only do this if you're not using CDK for other projects
+   # This removes the CDK toolkit stack and S3 bucket
+   aws cloudformation delete-stack --stack-name CDKToolkit
+   ```
+   
+   > **Warning**: Only delete CDK bootstrap resources if you're not using CDK for other projects in this account/region.
+
 ## Troubleshooting Guide
+
+### TypeScript Compilation Errors with Shebang
+
+**Issue**: When running `cdk synth`, you get TypeScript compilation errors related to the shebang line (`#!/usr/bin/env node`):
+
+```
+TSError: ⨯ Unable to compile TypeScript:
+bin/devops-lab-cdk.ts:2:5 - error TS2362: The left-hand side of an arithmetic operation must be of type 'any', 'number', 'bigint' or an enum type.
+2    #!/usr/bin/env node
+     ~~~~~~~~~
+```
+
+**Solution**: 
+1. Ensure the shebang line `#!/usr/bin/env node` is the very first line of the file with no preceding whitespace or empty lines
+2. The file should start exactly like this:
+   ```typescript
+   #!/usr/bin/env node
+   import 'source-map-support/register';
+   ```
+
+**Root Cause**: TypeScript compiler tries to parse the shebang as TypeScript code when there are empty lines or whitespace before it.
+
+### EcsTarget API Deprecation
+
+**Issue**: When creating custom constructs, you may encounter errors about `EcsTarget` not existing:
+
+```
+error TS2339: Property 'EcsTarget' does not exist on type 'typeof import("aws-cdk-lib/aws-elasticloadbalancingv2")'
+```
+
+**Solution**: 
+The `EcsTarget` class has been deprecated in favor of directly passing the ECS service to the target group:
+
+```typescript
+// OLD (deprecated) approach:
+targets: [
+  new elbv2.EcsTarget({
+    containerName: 'Container',
+    containerPort: props.containerPort,
+    newTargetGroupId: 'ECS',
+    taskDefinition,
+  }),
+]
+
+// NEW (correct) approach:
+targets: [this.service]
+```
+
+**Root Cause**: CDK v2 simplified the API by allowing ECS services to be passed directly as targets.
 
 
 
@@ -997,29 +1069,60 @@ This lab creates the following AWS resources:
 
 When you're finished with the lab, follow these steps to avoid ongoing charges:
 
+### Complete Resource Cleanup Checklist
+
 1. **Destroy all CDK stacks:**
    ```bash
-   # Destroy all stacks
+   # Navigate to your CDK project directory
+   cd devops-lab-cdk
+   
+   # Destroy all stacks (will prompt for confirmation)
    cdk destroy --all
    ```
 
-2. **Verify resource cleanup:**
+2. **Verify CloudFormation stack deletion:**
    ```bash
    # Check that stacks have been removed
    aws cloudformation list-stacks --query "StackSummaries[?contains(StackName, 'dev-')].{Name:StackName,Status:StackStatus}"
    ```
    
    - Ensure all stacks show "DELETE_COMPLETE" status
-   - Check the AWS Console for any remaining resources
+   - If any stacks show "DELETE_FAILED", check the CloudFormation console for details
 
-3. **Clean up local files:**
+3. **Manual verification in AWS Console:**
+   - **VPC**: Verify VPC, subnets, NAT Gateway, and Internet Gateway are deleted
+   - **EC2**: Check for remaining load balancers, target groups, security groups
+   - **ECS**: Confirm clusters, services, and task definitions are removed
+   - **CloudWatch**: Check for log groups and dashboards
+   - **IAM**: Verify no CDK-created roles remain (they should auto-delete)
+
+4. **Clean up CDK bootstrap (optional):**
+   ```bash
+   # Only if you're not using CDK for other projects
+   aws cloudformation delete-stack --stack-name CDKToolkit
+   
+   # Wait for deletion to complete
+   aws cloudformation wait stack-delete-complete --stack-name CDKToolkit
+   ```
+
+5. **Clean up local files:**
    ```bash
    # Remove the CDK project directory
    cd ..
    rm -rf devops-lab-cdk
+   
+   # On Windows:
+   # rmdir /s devops-lab-cdk
    ```
 
-> **Important**: Failure to delete resources may result in unexpected charges to your AWS account. The NAT Gateway and Application Load Balancer are the most expensive components.
+### Cost Monitoring
+
+The most expensive resources in this lab are:
+- **NAT Gateway**: ~$45/month if left running
+- **Application Load Balancer**: ~$16/month if left running
+- **ECS Fargate**: ~$15/month for 2 tasks if left running
+
+> **⚠️ Critical**: Failure to delete resources may result in unexpected charges to your AWS account. Always verify cleanup in the AWS Console.
 
 ## Next Steps
 
