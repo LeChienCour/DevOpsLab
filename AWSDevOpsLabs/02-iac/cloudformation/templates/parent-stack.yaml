@@ -16,6 +16,10 @@ Parameters:
   KeyPairName:
     Type: AWS::EC2::KeyPair::KeyName
     Description: EC2 Key Pair for instances
+  
+  TemplatesBucket:
+    Type: String
+    Description: S3 bucket name containing nested stack templates
 
 Resources:
   # Nested Stack for Network Infrastructure
@@ -129,18 +133,7 @@ Resources:
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
 
-  # S3 Bucket for storing nested stack templates
-  TemplatesBucket:
-    Type: AWS::S3::Bucket
-    Properties:
-      BucketName: !Sub '${AWS::StackName}-templates-${AWS::AccountId}-${AWS::Region}'
-      VersioningConfiguration:
-        Status: Enabled
-      PublicAccessBlockConfiguration:
-        BlockPublicAcls: true
-        BlockPublicPolicy: true
-        IgnorePublicAcls: true
-        RestrictPublicBuckets: true
+  # Note: S3 Bucket for templates is created externally by the provisioning script
 
 Outputs:
   ParentStackId:

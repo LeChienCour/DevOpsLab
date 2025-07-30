@@ -24,7 +24,6 @@ Learn advanced AWS CloudFormation techniques by implementing a multi-tier applic
 - Change sets for previewing infrastructure changes
 - Configuration drift detection and remediation
 - Custom resources with Lambda functions
-- Stack sets for multi-account deployments
 
 **Resources Created**:
 - Parent CloudFormation stack orchestrating nested stacks

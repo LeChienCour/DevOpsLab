@@ -88,13 +88,7 @@ This lab creates a multi-tier application infrastructure using nested CloudForma
    - Note the dependencies between stacks
    - Observe the resource organization by function
 
-3. **Review the stack set template:**
-   ```bash
-   # View the stack set template for multi-region deployment
-   cat templates/stackset-template.yaml
-   ```
-   
-   - Understand how stack sets enable multi-region and multi-account deployments
+
 
 ### Step 2: Deploy the Nested Stacks
 
@@ -144,28 +138,19 @@ This lab creates a multi-tier application infrastructure using nested CloudForma
    # Create a change set to modify the VPC CIDR
    CHANGE_SET_NAME="vpc-cidr-change-$(date +%s)"
    
-   aws cloudformation create-change-set \
-     --stack-name devops-lab-nested \
-     --change-set-name $CHANGE_SET_NAME \
-     --template-body file://templates/parent-stack.yaml \
-     --parameters \
-       ParameterKey=Environment,UsePreviousValue=true \
-       ParameterKey=VpcCidr,ParameterValue="10.1.0.0/16" \
-       ParameterKey=KeyPairName,UsePreviousValue=true \
-     --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM
+   # First, get the templates bucket name from the existing stack
+   TEMPLATES_BUCKET=$(aws cloudformation describe-stacks --stack-name devops-lab-nested --query 'Stacks[0].Parameters[?ParameterKey==`TemplatesBucket`].ParameterValue' --output text)
+   
+   aws cloudformation create-change-set --stack-name devops-lab-nested --change-set-name $CHANGE_SET_NAME --template-body file://templates/parent-stack.yaml --parameters ParameterKey=Environment,UsePreviousValue=true ParameterKey=VpcCidr,ParameterValue="10.1.0.0/16" ParameterKey=KeyPairName,UsePreviousValue=true ParameterKey=TemplatesBucket,ParameterValue=$TEMPLATES_BUCKET --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM
    ```
 
 2. **Review the change set:**
    ```bash
    # Wait for change set creation to complete
-   aws cloudformation wait change-set-create-complete \
-     --stack-name devops-lab-nested \
-     --change-set-name $CHANGE_SET_NAME
+   aws cloudformation wait change-set-create-complete --stack-name devops-lab-nested --change-set-name $CHANGE_SET_NAME
    
    # View the changes that would be made
-   aws cloudformation describe-change-set \
-     --stack-name devops-lab-nested \
-     --change-set-name $CHANGE_SET_NAME
+   aws cloudformation describe-change-set --stack-name devops-lab-nested --change-set-name $CHANGE_SET_NAME
    ```
    
    - Observe which resources would be modified, replaced, or deleted
@@ -174,14 +159,10 @@ This lab creates a multi-tier application infrastructure using nested CloudForma
 3. **Execute or delete the change set:**
    ```bash
    # To execute the change set:
-   aws cloudformation execute-change-set \
-     --stack-name devops-lab-nested \
-     --change-set-name $CHANGE_SET_NAME
+   aws cloudformation execute-change-set --stack-name devops-lab-nested --change-set-name $CHANGE_SET_NAME
    
    # OR to delete the change set without executing:
-   aws cloudformation delete-change-set \
-     --stack-name devops-lab-nested \
-     --change-set-name $CHANGE_SET_NAME
+   aws cloudformation delete-change-set --stack-name devops-lab-nested --change-set-name $CHANGE_SET_NAME
    ```
    
    > **Note**: Executing the change set will modify your infrastructure. For this lab, you can delete the change set without executing it.
@@ -191,10 +172,7 @@ This lab creates a multi-tier application infrastructure using nested CloudForma
 1. **Initiate drift detection:**
    ```bash
    # Start drift detection on the parent stack
-   DRIFT_ID=$(aws cloudformation detect-stack-drift \
-     --stack-name devops-lab-nested \
-     --query 'StackDriftDetectionId' \
-     --output text)
+   DRIFT_ID=$(aws cloudformation detect-stack-drift --stack-name devops-lab-nested --query 'StackDriftDetectionId' --output text)
    
    echo "Drift detection initiated with ID: $DRIFT_ID"
    ```
@@ -202,12 +180,17 @@ This lab creates a multi-tier application infrastructure using nested CloudForma
 2. **Check drift detection status:**
    ```bash
    # Wait for drift detection to complete
-   aws cloudformation wait stack-drift-detection-complete \
-     --stack-drift-detection-id $DRIFT_ID
-   
+   while true; do
+     STATUS=$(aws cloudformation describe-stack-drift-detection-status --stack-drift-detection-id $DRIFT_ID --query 'DetectionStatus' --output text)
+     if [ "$STATUS" = "DETECTION_COMPLETE" ] || [ "$STATUS" = "DETECTION_FAILED" ]; then
+       break
+     fi
+     echo "Drift detection in progress... Status: $STATUS"
+     sleep 10
+   done
+
    # View the drift detection results
-   aws cloudformation describe-stack-drift-detection-status \
-     --stack-drift-detection-id $DRIFT_ID
+   aws cloudformation describe-stack-drift-detection-status --stack-drift-detection-id $DRIFT_ID
    ```
    
    Expected output if no drift:
@@ -218,91 +201,204 @@ This lab creates a multi-tier application infrastructure using nested CloudForma
 3. **Manually modify a resource to create drift:**
    ```bash
    # Get the security group ID from the security stack
-   SG_ID=$(aws cloudformation describe-stack-resources \
-     --stack-name $(aws cloudformation describe-stack-resource \
-       --stack-name devops-lab-nested \
-       --logical-resource-id SecurityStack \
-       --query 'StackResourceDetail.PhysicalResourceId' \
-       --output text) \
-     --logical-resource-id WebSecurityGroup \
-     --query 'StackResources[0].PhysicalResourceId' \
-     --output text)
+   SG_ID=$(aws cloudformation describe-stack-resources --stack-name $(aws cloudformation describe-stack-resource --stack-name devops-lab-nested --logical-resource-id SecurityStack --query 'StackResourceDetail.PhysicalResourceId' --output text) --logical-resource-id WebSecurityGroup --query 'StackResources[0].PhysicalResourceId' --output text)
    
    # Add a new ingress rule to create drift
-   aws ec2 authorize-security-group-ingress \
-     --group-id $SG_ID \
-     --protocol tcp \
-     --port 8080 \
-     --cidr 0.0.0.0/0
+   aws ec2 authorize-security-group-ingress --group-id $SG_ID --protocol tcp --port 8080 --cidr 0.0.0.0/0
    
    echo "Added new rule to security group $SG_ID to demonstrate drift"
    ```
 
 4. **Re-run drift detection and view drifted resources:**
+   
+   > **Important**: Parent stacks do not automatically detect drift in nested stacks. You must run drift detection on individual nested stacks to see their drift status.
+   
    ```bash
-   # Start new drift detection
-   DRIFT_ID=$(aws cloudformation detect-stack-drift \
-     --stack-name devops-lab-nested \
-     --query 'StackDriftDetectionId' \
-     --output text)
+   # Start new drift detection on the parent stack
+   DRIFT_ID=$(aws cloudformation detect-stack-drift --stack-name devops-lab-nested --query 'StackDriftDetectionId' --output text)
    
    # Wait for drift detection to complete
-   aws cloudformation wait stack-drift-detection-complete \
-     --stack-drift-detection-id $DRIFT_ID
+   while true; do
+     STATUS=$(aws cloudformation describe-stack-drift-detection-status --stack-drift-detection-id $DRIFT_ID --query 'DetectionStatus' --output text)
+     if [ "$STATUS" = "DETECTION_COMPLETE" ] || [ "$STATUS" = "DETECTION_FAILED" ]; then
+       break
+     fi
+     echo "Drift detection in progress... Status: $STATUS"
+     sleep 10
+   done
    
    # View the drift detection results
-   aws cloudformation describe-stack-drift-detection-status \
-     --stack-drift-detection-id $DRIFT_ID
+   aws cloudformation describe-stack-drift-detection-status --stack-drift-detection-id $DRIFT_ID
+   ```
    
-   # View drifted resources
-   aws cloudformation describe-stack-resource-drifts \
-     --stack-name devops-lab-nested \
-     --stack-resource-drift-status-filters MODIFIED DELETED
+   **For comprehensive drift detection on nested stacks, run drift detection on each nested stack:**
+   ```bash
+   # Check drift on the network stack
+   NETWORK_STACK_ID=$(aws cloudformation describe-stack-resource --stack-name devops-lab-nested --logical-resource-id NetworkStack --query 'StackResourceDetail.PhysicalResourceId' --output text)
+   
+   NETWORK_DRIFT_ID=$(aws cloudformation detect-stack-drift --stack-name $NETWORK_STACK_ID --query 'StackDriftDetectionId' --output text)
+   
+   # Check drift on the security stack
+   SECURITY_STACK_ID=$(aws cloudformation describe-stack-resource --stack-name devops-lab-nested --logical-resource-id SecurityStack --query 'StackResourceDetail.PhysicalResourceId' --output text)
+   
+   SECURITY_DRIFT_ID=$(aws cloudformation detect-stack-drift --stack-name $SECURITY_STACK_ID --query 'StackDriftDetectionId' --output text)
+   
+   # Check drift on the application stack
+   APPLICATION_STACK_ID=$(aws cloudformation describe-stack-resource --stack-name devops-lab-nested --logical-resource-id ApplicationStack --query 'StackResourceDetail.PhysicalResourceId' --output text)
+   
+   APPLICATION_DRIFT_ID=$(aws cloudformation detect-stack-drift --stack-name $APPLICATION_STACK_ID --query 'StackDriftDetectionId' --output text)
+   
+   # Wait for all drift detections to complete
+   echo "Waiting for drift detection to complete on all nested stacks..."
+   
+   # Wait for network stack
+   while true; do
+     STATUS=$(aws cloudformation describe-stack-drift-detection-status --stack-drift-detection-id $NETWORK_DRIFT_ID --query 'DetectionStatus' --output text)
+     if [ "$STATUS" = "DETECTION_COMPLETE" ] || [ "$STATUS" = "DETECTION_FAILED" ]; then
+       break
+     fi
+     echo "Network stack drift detection in progress... Status: $STATUS"
+     sleep 5
+   done
+   
+   # Wait for security stack
+   while true; do
+     STATUS=$(aws cloudformation describe-stack-drift-detection-status --stack-drift-detection-id $SECURITY_DRIFT_ID --query 'DetectionStatus' --output text)
+     if [ "$STATUS" = "DETECTION_COMPLETE" ] || [ "$STATUS" = "DETECTION_FAILED" ]; then
+       break
+     fi
+     echo "Security stack drift detection in progress... Status: $STATUS"
+     sleep 5
+   done
+   
+   # Wait for application stack
+   while true; do
+     STATUS=$(aws cloudformation describe-stack-drift-detection-status --stack-drift-detection-id $APPLICATION_DRIFT_ID --query 'DetectionStatus' --output text)
+     if [ "$STATUS" = "DETECTION_COMPLETE" ] || [ "$STATUS" = "DETECTION_FAILED" ]; then
+       break
+     fi
+     echo "Application stack drift detection in progress... Status: $STATUS"
+     sleep 5
+   done
+   
+   # View drift results for all nested stacks
+   echo "=== Network Stack Drift Results ==="
+   aws cloudformation describe-stack-drift-detection-status --stack-drift-detection-id $NETWORK_DRIFT_ID
+   aws cloudformation describe-stack-resource-drifts --stack-name $NETWORK_STACK_ID --stack-resource-drift-status-filters MODIFIED DELETED
+   
+   echo "=== Security Stack Drift Results ==="
+   aws cloudformation describe-stack-drift-detection-status --stack-drift-detection-id $SECURITY_DRIFT_ID
+   aws cloudformation describe-stack-resource-drifts --stack-name $SECURITY_STACK_ID --stack-resource-drift-status-filters MODIFIED DELETED
+   
+   echo "=== Application Stack Drift Results ==="
+   aws cloudformation describe-stack-drift-detection-status --stack-drift-detection-id $APPLICATION_DRIFT_ID
+   aws cloudformation describe-stack-resource-drifts --stack-name $APPLICATION_STACK_ID --stack-resource-drift-status-filters MODIFIED DELETED
    ```
    
    - Note which resources have drifted from their expected configuration
    - Observe the differences between current and expected property values
+   - The security group should show the added port 8080 rule as drift
+   - Any manually modified network resources will show up in the NetworkStack drift results
 
-5. **Remediate drift by updating the stack:**
+5. **Remediate drift (Understanding CloudFormation's limitations):**
+
+   **Important Reality**: CloudFormation stack updates do NOT automatically remediate drift. Adding tags or updating stacks only works if the template or parameters actually change the resource definitions.
+
+   **The only reliable way to fix drift is manual remediation:**
+
    ```bash
-   # Update the stack to match the template again (remediate drift)
-   aws cloudformation update-stack \
-     --stack-name devops-lab-nested \
-     --use-previous-template \
-     --parameters \
-       ParameterKey=Environment,UsePreviousValue=true \
-       ParameterKey=VpcCidr,UsePreviousValue=true \
-       ParameterKey=KeyPairName,UsePreviousValue=true \
-     --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM
+   # Get the security stack ID and the drifted security group
+   SECURITY_STACK_ID=$(aws cloudformation describe-stack-resource --stack-name devops-lab-nested --logical-resource-id SecurityStack --query 'StackResourceDetail.PhysicalResourceId' --output text)
    
-   # Wait for update to complete
-   aws cloudformation wait stack-update-complete \
-     --stack-name devops-lab-nested
+   # Get the security group ID that has drifted
+   SG_ID=$(aws cloudformation describe-stack-resources --stack-name $SECURITY_STACK_ID --query 'StackResources[?ResourceType==`AWS::EC2::SecurityGroup` && LogicalResourceId==`WebSecurityGroup`].PhysicalResourceId' --output text)
+   
+   # Manually remove the drifted port 8080 rule
+   aws ec2 revoke-security-group-ingress --group-id $SG_ID --protocol tcp --port 8080 --cidr 0.0.0.0/0
+   
+   echo "Manually removed the drifted security group rule"
+   echo "This is the only reliable way to fix CloudFormation drift"
    ```
+
+   **Alternative: Fix drift using AWS Console:**
    
-   - This will revert the manually added security group rule
-   - The stack will return to its defined state in the template
-
-### Step 5: Explore Stack Sets (Optional)
-
-1. **Review the stack set template:**
+   1. **Navigate to EC2 Security Groups:**
+      - Go to AWS Console → EC2 → Security Groups
+      - Search for the security group name (should contain "dev-web-sg" or similar)
+      - Or use the security group ID from the drift detection results
+   
+   2. **Remove the drifted rule:**
+      - Select the security group that has drifted
+      - Click on the "Inbound rules" tab
+      - Find the rule for port 8080 (TCP, 0.0.0.0/0)
+      - Select the rule and click "Delete rule"
+      - Click "Save rules"
+   
+   3. **Confirm the change:**
+      - The port 8080 rule should no longer appear in the inbound rules
+      - The security group now matches the CloudFormation template definition
+   
+   **Verify drift is fixed:**
    ```bash
-   # View the stack set template
-   cat templates/stackset-template.yaml
-   ```
+   # After manual remediation, verify that drift is resolved
+   SECURITY_STACK_ID=$(aws cloudformation describe-stack-resource --stack-name devops-lab-nested --logical-resource-id SecurityStack --query 'StackResourceDetail.PhysicalResourceId' --output text)
    
-   - Note how the template is designed for multi-region deployment
-   - Observe the parameters that allow customization per region
+   # Run drift detection again to confirm it's fixed
+   DRIFT_ID=$(aws cloudformation detect-stack-drift --stack-name $SECURITY_STACK_ID --query 'StackDriftDetectionId' --output text)
+   
+   # Wait for detection to complete
+   while true; do
+     STATUS=$(aws cloudformation describe-stack-drift-detection-status --stack-drift-detection-id $DRIFT_ID --query 'DetectionStatus' --output text)
+     if [ "$STATUS" = "DETECTION_COMPLETE" ] || [ "$STATUS" = "DETECTION_FAILED" ]; then
+       break
+     fi
+     echo "Drift detection in progress... Status: $STATUS"
+     sleep 5
+   done
+   
+   # Check results - should show no drift now
+   echo "=== Post-Remediation Drift Status ==="
+   aws cloudformation describe-stack-drift-detection-status --stack-drift-detection-id $DRIFT_ID
+   
+   # This should return no results if drift is fixed
+   DRIFT_COUNT=$(aws cloudformation describe-stack-resource-drifts --stack-name $SECURITY_STACK_ID --stack-resource-drift-status-filters MODIFIED DELETED --query 'length(StackResourceDrifts)' --output text)
+   
+   if [ "$DRIFT_COUNT" -eq 0 ]; then
+     echo "✅ Drift successfully remediated - no drifted resources found"
+   else
+     echo "❌ Drift still exists - $DRIFT_COUNT resources still drifted"
+     aws cloudformation describe-stack-resource-drifts --stack-name $SECURITY_STACK_ID --stack-resource-drift-status-filters MODIFIED DELETED
+   fi
+   ```
 
-2. **Create and manage stack sets:**
-   ```bash
-   # Run the stack set management script
-   ./scripts/manage-stacksets.sh
-   ```
+   **Alternative: Verify drift remediation using AWS Console:**
    
-   - Follow the prompts to create a stack set
-   - Observe how instances are created in multiple regions
-   - Note the permissions required for stack set operations
+   1. **Navigate to CloudFormation:**
+      - Go to AWS Console → CloudFormation
+      - Find the Security nested stack (name will contain "SecurityStack")
+      - Click on the stack name
+   
+   2. **Run drift detection:**
+      - Click on "Stack actions" → "Detect drift"
+      - Wait for the detection to complete (refresh the page if needed)
+      - The status should change to "Detection complete"
+   
+   3. **View drift results:**
+      - Click on "Stack actions" → "View drift results"
+      - If drift is fixed, you should see "No resources have drifted"
+      - If drift still exists, you'll see the drifted resources listed
+   
+   4. **Check individual resources:**
+      - Go to the "Resources" tab
+      - Look for the WebSecurityGroup resource
+      - The "Drift status" column should show "IN_SYNC" if drift is fixed
+
+   **Key Learning Points:**
+   - CloudFormation drift detection is for monitoring only, not automatic remediation
+   - Stack updates (even with tags) do NOT fix drift unless the template actually changes the resource
+   - Manual remediation is the most reliable approach for fixing drift
+   - This is a fundamental limitation of CloudFormation that teams must understand
+   - In production, consider tools like AWS Config Rules or custom automation for drift remediation
 
 ## Troubleshooting Guide
 

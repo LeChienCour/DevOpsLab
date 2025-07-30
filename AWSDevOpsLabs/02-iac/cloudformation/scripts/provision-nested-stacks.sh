@@ -71,11 +71,11 @@ check_prerequisites() {
     print_success "Prerequisites check completed"
 }
 
-# Function to create and upload templates to S3
-upload_templates() {
+# Function to create bucket and upload templates
+prepare_templates() {
     print_status "Creating S3 bucket for templates..."
     
-    # Create bucket if it doesn't exist
+    # Create bucket if it doesn't exist (separate from stack)
     if ! aws s3 ls "s3://$TEMPLATES_BUCKET" &> /dev/null; then
         if [ "$REGION" = "us-east-1" ]; then
             aws s3 mb "s3://$TEMPLATES_BUCKET"
@@ -89,24 +89,34 @@ upload_templates() {
     
     # Upload nested stack templates
     print_status "Uploading nested stack templates..."
-    aws s3 cp ../templates/network-stack.yaml "s3://$TEMPLATES_BUCKET/"
-    aws s3 cp ../templates/security-stack.yaml "s3://$TEMPLATES_BUCKET/"
-    aws s3 cp ../templates/application-stack.yaml "s3://$TEMPLATES_BUCKET/"
+    
+    # Get the script directory to build correct paths
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    TEMPLATES_DIR="$SCRIPT_DIR/../templates"
+    
+    aws s3 cp "$TEMPLATES_DIR/network-stack.yaml" "s3://$TEMPLATES_BUCKET/"
+    aws s3 cp "$TEMPLATES_DIR/security-stack.yaml" "s3://$TEMPLATES_BUCKET/"
+    aws s3 cp "$TEMPLATES_DIR/application-stack.yaml" "s3://$TEMPLATES_BUCKET/"
     
     print_success "Templates uploaded successfully"
 }
 
-# Function to deploy the parent stack
+# Function to deploy the parent stack with nested stacks
 deploy_parent_stack() {
-    print_status "Deploying parent stack: $STACK_NAME"
+    print_status "Deploying parent stack with nested stacks: $STACK_NAME"
+    
+    # Get the script directory to build correct paths
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    TEMPLATES_DIR="$SCRIPT_DIR/../templates"
     
     aws cloudformation deploy \
-        --template-file ../templates/parent-stack.yaml \
+        --template-file "$TEMPLATES_DIR/parent-stack.yaml" \
         --stack-name "$STACK_NAME" \
         --parameter-overrides \
             Environment="$ENVIRONMENT" \
             VpcCidr="$VPC_CIDR" \
             KeyPairName="$KEY_PAIR_NAME" \
+            TemplatesBucket="$TEMPLATES_BUCKET" \
         --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM \
         --tags \
             Environment="$ENVIRONMENT" \
@@ -114,7 +124,7 @@ deploy_parent_stack() {
             LabType="NestedStacks"
     
     if [ $? -eq 0 ]; then
-        print_success "Parent stack deployed successfully"
+        print_success "Parent stack with nested stacks deployed successfully"
     else
         print_error "Failed to deploy parent stack"
         exit 1
@@ -140,113 +150,7 @@ display_outputs() {
         --output table
 }
 
-# Function to demonstrate change sets
-demonstrate_change_sets() {
-    print_status "Demonstrating change sets..."
-    
-    CHANGE_SET_NAME="demo-change-set-$(date +%s)"
-    
-    # Create a change set with a parameter change
-    print_status "Creating change set: $CHANGE_SET_NAME"
-    aws cloudformation create-change-set \
-        --stack-name "$STACK_NAME" \
-        --change-set-name "$CHANGE_SET_NAME" \
-        --template-body file://../templates/parent-stack.yaml \
-        --parameters \
-            ParameterKey=Environment,ParameterValue="$ENVIRONMENT" \
-            ParameterKey=VpcCidr,ParameterValue="10.1.0.0/16" \
-            ParameterKey=KeyPairName,ParameterValue="$KEY_PAIR_NAME" \
-        --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM
-    
-    # Wait for change set to be created
-    print_status "Waiting for change set to be created..."
-    aws cloudformation wait change-set-create-complete \
-        --stack-name "$STACK_NAME" \
-        --change-set-name "$CHANGE_SET_NAME"
-    
-    # Display change set details
-    print_status "Change set details:"
-    aws cloudformation describe-change-set \
-        --stack-name "$STACK_NAME" \
-        --change-set-name "$CHANGE_SET_NAME" \
-        --query 'Changes[*].[Action,ResourceChange.LogicalResourceId,ResourceChange.ResourceType,ResourceChange.Replacement]' \
-        --output table
-    
-    # Ask user if they want to execute the change set
-    echo ""
-    read -p "Do you want to execute this change set? (y/N): " -n 1 -r
-    echo ""
-    if [[ $REPLY =~ ^[Yy]$ ]]; then
-        print_status "Executing change set..."
-        aws cloudformation execute-change-set \
-            --stack-name "$STACK_NAME" \
-            --change-set-name "$CHANGE_SET_NAME"
-        
-        print_status "Waiting for stack update to complete..."
-        aws cloudformation wait stack-update-complete --stack-name "$STACK_NAME"
-        print_success "Change set executed successfully"
-    else
-        print_status "Deleting change set without execution..."
-        aws cloudformation delete-change-set \
-            --stack-name "$STACK_NAME" \
-            --change-set-name "$CHANGE_SET_NAME"
-        print_status "Change set deleted"
-    fi
-}
 
-# Function to show drift detection
-demonstrate_drift_detection() {
-    print_status "Demonstrating drift detection..."
-    
-    # Start drift detection
-    DRIFT_DETECTION_ID=$(aws cloudformation detect-stack-drift \
-        --stack-name "$STACK_NAME" \
-        --query 'StackDriftDetectionId' \
-        --output text)
-    
-    print_status "Drift detection started with ID: $DRIFT_DETECTION_ID"
-    print_status "Waiting for drift detection to complete..."
-    
-    # Wait for drift detection to complete
-    while true; do
-        STATUS=$(aws cloudformation describe-stack-drift-detection-status \
-            --stack-drift-detection-id "$DRIFT_DETECTION_ID" \
-            --query 'DetectionStatus' \
-            --output text)
-        
-        if [ "$STATUS" = "DETECTION_COMPLETE" ]; then
-            break
-        elif [ "$STATUS" = "DETECTION_FAILED" ]; then
-            print_error "Drift detection failed"
-            return 1
-        fi
-        
-        sleep 5
-    done
-    
-    # Show drift results
-    print_status "Drift detection results:"
-    aws cloudformation describe-stack-drift-detection-status \
-        --stack-drift-detection-id "$DRIFT_DETECTION_ID" \
-        --query '[StackDriftStatus,DriftedStackResourceCount]' \
-        --output table
-    
-    # Show drifted resources if any
-    DRIFTED_COUNT=$(aws cloudformation describe-stack-drift-detection-status \
-        --stack-drift-detection-id "$DRIFT_DETECTION_ID" \
-        --query 'DriftedStackResourceCount' \
-        --output text)
-    
-    if [ "$DRIFTED_COUNT" -gt 0 ]; then
-        print_warning "Found $DRIFTED_COUNT drifted resources:"
-        aws cloudformation describe-stack-resource-drifts \
-            --stack-name "$STACK_NAME" \
-            --query 'StackResourceDrifts[?StackResourceDriftStatus!=`IN_SYNC`].[LogicalResourceId,ResourceType,StackResourceDriftStatus]' \
-            --output table
-    else
-        print_success "No drift detected - stack is in sync"
-    fi
-}
 
 # Main execution
 main() {
@@ -255,23 +159,11 @@ main() {
     echo ""
     
     check_prerequisites
-    upload_templates
+    prepare_templates
     deploy_parent_stack
     display_outputs
     
-    echo ""
-    read -p "Do you want to demonstrate change sets? (y/N): " -n 1 -r
-    echo ""
-    if [[ $REPLY =~ ^[Yy]$ ]]; then
-        demonstrate_change_sets
-    fi
-    
-    echo ""
-    read -p "Do you want to demonstrate drift detection? (y/N): " -n 1 -r
-    echo ""
-    if [[ $REPLY =~ ^[Yy]$ ]]; then
-        demonstrate_drift_detection
-    fi
+
     
     echo ""
     print_success "Lab deployment completed!"
