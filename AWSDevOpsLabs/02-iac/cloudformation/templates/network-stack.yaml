@@ -67,24 +67,7 @@ Resources:
         - Key: Environment
           Value: !Ref Environment
 
-  # NAT Gateway
-  NatGatewayEIP:
-    Type: AWS::EC2::EIP
-    DependsOn: InternetGatewayAttachment
-    Properties:
-      Domain: vpc
-      Tags:
-        - Key: Name
-          Value: !Sub '${Environment}-nat-eip'
 
-  NatGateway:
-    Type: AWS::EC2::NatGateway
-    Properties:
-      AllocationId: !GetAtt NatGatewayEIP.AllocationId
-      SubnetId: !Ref PublicSubnet
-      Tags:
-        - Key: Name
-          Value: !Sub '${Environment}-nat-gateway'
 
   # Route Tables
   PublicRouteTable:
@@ -121,13 +104,6 @@ Resources:
         - Key: Environment
           Value: !Ref Environment
 
-  DefaultPrivateRoute:
-    Type: AWS::EC2::Route
-    Properties:
-      RouteTableId: !Ref PrivateRouteTable
-      DestinationCidrBlock: 0.0.0.0/0
-      NatGatewayId: !Ref NatGateway
-
   PrivateSubnetRouteTableAssociation:
     Type: AWS::EC2::SubnetRouteTableAssociation
     Properties:
@@ -150,7 +126,3 @@ Outputs:
   InternetGatewayId:
     Description: Internet Gateway ID
     Value: !Ref InternetGateway
-
-  NatGatewayId:
-    Description: NAT Gateway ID
-    Value: !Ref NatGateway
