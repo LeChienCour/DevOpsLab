@@ -235,8 +235,8 @@ resource "aws_ecs_service" "main" {
 
   network_configuration {
     security_groups  = [aws_security_group.ecs_tasks.id]
-    subnets          = var.private_subnet_ids
-    assign_public_ip = false
+    subnets          = var.enable_nat_gateway ? var.private_subnet_ids : var.public_subnet_ids
+    assign_public_ip = var.enable_nat_gateway ? false : true
   }
 
   load_balancer {
@@ -252,9 +252,9 @@ resource "aws_ecs_service" "main" {
     Type = "ECSService"
   })
 
-  lifecycle {
-    ignore_changes = [desired_count]
-  }
+  # lifecycle {
+  #   ignore_changes = [desired_count]
+  # }
 }
 
 # Auto Scaling Target

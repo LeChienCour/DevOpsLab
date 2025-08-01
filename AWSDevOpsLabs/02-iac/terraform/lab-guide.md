@@ -186,7 +186,7 @@ This lab creates a multi-tier application infrastructure using Terraform modules
    terraform output
    
    # Get the load balancer URL
-   terraform output web_app_url
+   terraform output application_url
    ```
    
    - Open the web application URL in a browser
@@ -194,30 +194,40 @@ This lab creates a multi-tier application infrastructure using Terraform modules
 
 ### Step 4: Explore Terraform State Management
 
-1. **Examine the local state:**
+1. **Understand remote state storage:**
    ```bash
-   # View the state file (if using local state)
-   cat terraform.tfstate
+   # Check if local state file exists (it shouldn't with remote backend)
+   ls -la terraform.tfstate 2>/dev/null || echo "No local state file - using remote state in S3"
+   
+   # Verify backend configuration
+   terraform init -backend=false -get=false
    ```
    
-   > **Note**: With remote state configured, this file may not exist locally.
+   > **Note**: With remote state configured, the state is stored in S3, not locally. This is the correct and desired behavior for team collaboration.
 
 2. **Interact with the remote state:**
    ```bash
-   # List the state
+   # List all resources in the state
    terraform state list
    
    # Show details of a specific resource
    terraform state show module.vpc.aws_vpc.main
+   
+   # Show details of the web app load balancer
+   terraform state show module.web_app.aws_lb.main
    ```
    
    - Note the resource addresses and their current state
    - Understand how Terraform tracks resource attributes
+   - Observe that all state operations work seamlessly with remote state
 
 3. **Use state commands for management:**
    ```bash
-   # Pull the latest state
+   # Pull the latest state from S3 to a local file for inspection
    terraform state pull > current-state.json
+   
+   # Verify the state was pulled from remote backend
+   echo "State file size: $(wc -c < current-state.json) bytes"
    
    # View the state file structure
    cat current-state.json | jq .
@@ -225,6 +235,39 @@ This lab creates a multi-tier application infrastructure using Terraform modules
    
    - Observe the state file structure
    - Note the resource dependencies and attributes
+
+4. **Verify remote state backend:**
+   ```bash
+   # First, apply backend changes to ensure outputs are available
+   cd ../../../backend
+   
+   # Get the backend configuration details
+   BUCKET_NAME=$(terraform output -raw s3_bucket_name)
+   TABLE_NAME=$(terraform output -raw dynamodb_table_name)
+   
+   # Navigate back to dev environment
+   cd ../environments/dev
+   
+   # Check the S3 bucket for your state file
+   aws s3 ls s3://$BUCKET_NAME/dev/
+   
+   # List all objects in the state bucket to see environment separation
+   aws s3 ls s3://$BUCKET_NAME --recursive
+   
+   # Check DynamoDB table for state locks
+   aws dynamodb scan --table-name $TABLE_NAME --select COUNT
+   
+   # Alternative: Use simpler commands without variables
+   # List all S3 buckets and find the terraform-state bucket
+   aws s3 ls | grep terraform-state
+   
+   # List all DynamoDB tables and find the terraform-locks table
+   aws dynamodb list-tables | grep terraform-locks
+   ```
+   
+   - Confirm your state file exists in S3
+   - Understand how state locking prevents concurrent modifications
+   - Note the separation of state files by environment (dev/, staging/, prod/)
 
 ### Step 5: Make Infrastructure Changes
 
@@ -238,14 +281,15 @@ This lab creates a multi-tier application infrastructure using Terraform modules
 
 2. **Plan and apply the changes:**
    ```bash
-   # Create a new plan
-   terraform plan -out=update.tfplan
+   # Create a new plan with explicit refresh to detect all changes
+   terraform plan -refresh=true -out=update.tfplan
    
    # Apply the changes
    terraform apply update.tfplan
    ```
    
    - Note how Terraform identifies only the changes needed
+   - The `-refresh=true` flag ensures Terraform detects all configuration changes
    - Observe the incremental deployment approach
 
 3. **Verify the changes:**
@@ -616,6 +660,39 @@ When you're finished with the lab, follow these steps to avoid ongoing charges:
    # Destroy backend resources
    terraform destroy
    ```
+
+4. **Clean up generated files:**
+   ```bash
+   # Navigate to the terraform root directory
+   cd ..
+   
+   # Remove generated backend configuration files
+   rm -f backend-config.tf
+   rm -f environments/dev/backend.tf
+   rm -f environments/staging/backend.tf
+   rm -f environments/prod/backend.tf
+   
+   # Remove Terraform state files and directories (if any local state exists)
+   rm -f environments/dev/terraform.tfstate*
+   rm -f environments/dev/.terraform.lock.hcl
+   rm -rf environments/dev/.terraform/
+   
+   rm -f backend/terraform.tfstate*
+   rm -f backend/.terraform.lock.hcl
+   rm -rf backend/.terraform/
+   
+   # Remove any plan files
+   rm -f environments/dev/*.tfplan
+   rm -f backend/*.tfplan
+   
+   # Remove any pulled state files
+   rm -f environments/dev/current-state.json
+   rm -f backend/current-state.json
+   ```
+   
+   - These files were generated during the lab and are not part of the original project
+   - Removing them ensures a clean state for future lab runs
+   - The `.terraform/` directories contain provider plugins and can be regenerated with `terraform init`
 
 > **Important**: Failure to delete resources may result in unexpected charges to your AWS account. The NAT Gateway and Application Load Balancer are the most expensive components.
 

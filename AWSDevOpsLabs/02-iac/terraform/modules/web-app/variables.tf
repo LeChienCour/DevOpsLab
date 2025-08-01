@@ -152,6 +152,12 @@ variable "task_role_policies" {
   default = []
 }
 
+variable "enable_nat_gateway" {
+  description = "Whether NAT Gateway is enabled (affects subnet placement)"
+  type        = bool
+  default     = true
+}
+
 variable "common_tags" {
   description = "Common tags to apply to all resources"
   type        = map(string)

@@ -61,8 +61,8 @@ variable "nat_gateway_count" {
   default     = 1
 
   validation {
-    condition     = var.nat_gateway_count >= 1 && var.nat_gateway_count <= 6
-    error_message = "NAT Gateway count must be between 1 and 6."
+    condition     = var.nat_gateway_count >= 0 && var.nat_gateway_count <= 6
+    error_message = "NAT Gateway count must be between 0 and 6."
   }
 }
 

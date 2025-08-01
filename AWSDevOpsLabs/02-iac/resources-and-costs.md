@@ -63,9 +63,10 @@ This document provides a comprehensive list of AWS resources created by each lab
   - **Free Tier**: Yes - Internet Gateway is always free
   - **Cost**: $0.00
 
-- **NAT Gateway**: For private subnet internet access
+- **NAT Gateway**: For private subnet internet access (DISABLED in dev environment for cost optimization)
   - **Free Tier**: No
   - **Cost**: ~$0.045/hour (~$32/month) + data processing charges
+  - **Note**: Disabled by default in development environment to reduce costs
 
 - **Route Tables**: For controlling network traffic
   - **Free Tier**: Yes - Route Tables are always free
@@ -76,13 +77,17 @@ This document provides a comprehensive list of AWS resources created by each lab
   - **Free Tier**: Yes - ECS clusters are free, you pay for underlying resources
   - **Cost**: $0.00
 
-- **ECS Service**: For running the web application
+- **ECS Service**: For running the web application (1 task in dev environment)
   - **Free Tier**: Yes - ECS services are free, you pay for underlying resources
   - **Cost**: $0.00
 
-- **ECS Task Definition**: For container configuration
+- **ECS Task Definition**: For container configuration (256 CPU, 512 MB memory)
   - **Free Tier**: Yes - Task definitions are free
   - **Cost**: $0.00
+
+- **ECS Fargate Tasks**: For running containers (optimized for cost)
+  - **Free Tier**: No
+  - **Cost**: ~$0.04/hour for 256 CPU, 512 MB memory (~$5-8/month for single task)
 
 - **Application Load Balancer**: For distributing traffic
   - **Free Tier**: No
@@ -119,7 +124,17 @@ This document provides a comprehensive list of AWS resources created by each lab
   - **Free Tier**: Yes - IAM is always free
   - **Cost**: $0.00
 
-### Total Estimated Cost
+### Total Estimated Cost (Cost-Optimized Configuration)
+- **With Free Tier**: ~$18-25/month (primarily for ALB and ECS Fargate)
+- **Without Free Tier**: ~$20-30/month
+
+### Cost Optimization Changes Made
+- **NAT Gateway Disabled**: Saves ~$32/month by running ECS tasks in public subnets
+- **Minimal ECS Configuration**: 256 CPU, 512 MB memory, single task
+- **Reduced Log Retention**: 7-day retention instead of 30+ days
+- **Security Maintained**: Security groups restrict access to ALB only
+
+### Original Cost (Before Optimization)
 - **With Free Tier**: ~$50-60/month (primarily for NAT Gateway and ALB)
 - **Without Free Tier**: ~$50-70/month
 
@@ -212,9 +227,11 @@ This document provides a comprehensive list of AWS resources created by each lab
    - Set up billing alerts to notify when approaching free tier limits
 
 4. **Optimize networking costs**
-   - NAT Gateways are one of the most expensive components - consider alternatives like NAT instances for dev/test
+   - NAT Gateways are one of the most expensive components - the Terraform lab has been optimized to disable NAT Gateway in dev environment
+   - For production environments, consider alternatives like NAT instances for dev/test
    - Use VPC endpoints for AWS services to reduce NAT Gateway traffic
    - Consider using a single AZ for development environments to reduce redundant resources
+   - **Terraform Lab Optimization**: ECS tasks run in public subnets with security groups for protection
 
 5. **Manage state storage costs**
    - Implement lifecycle policies for S3 buckets to manage state file versions
@@ -227,5 +244,15 @@ This document provides a comprehensive list of AWS resources created by each lab
 - Costs may be higher in certain AWS regions
 - Free tier eligibility applies to new AWS accounts for the first 12 months
 - Always check the [AWS Pricing Calculator](https://calculator.aws/#/) for the most up-to-date pricing information
-- The most significant costs in these labs come from NAT Gateways and Load Balancers
+- **Terraform Lab Optimization**: NAT Gateway has been disabled in the development environment, reducing costs by ~60%
+- The most significant remaining costs in the Terraform lab come from the Application Load Balancer (~$16/month)
 - Remember to destroy all resources after completing the labs to avoid ongoing charges
+
+## Terraform Lab Security Considerations
+
+With the cost optimization changes (NAT Gateway disabled):
+- **ECS tasks run in public subnets** with public IP addresses
+- **Security is maintained** through security groups that restrict inbound traffic to ALB only
+- **No direct access** to containers from the internet (only through load balancer)
+- **Outbound traffic** is controlled through security group rules
+- **For production environments**, consider re-enabling NAT Gateway for additional network isolation

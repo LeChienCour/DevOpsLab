@@ -15,6 +15,17 @@ output "dynamodb_table_name" {
   value       = aws_dynamodb_table.terraform_locks.name
 }
 
+# Aliases for lab guide compatibility
+output "terraform_state_bucket_name" {
+  description = "Name of the S3 bucket for Terraform state (alias)"
+  value       = aws_s3_bucket.terraform_state.bucket
+}
+
+output "terraform_locks_table_name" {
+  description = "Name of the DynamoDB table for state locking (alias)"
+  value       = aws_dynamodb_table.terraform_locks.name
+}
+
 output "dynamodb_table_arn" {
   description = "ARN of the DynamoDB table for state locking"
   value       = aws_dynamodb_table.terraform_locks.arn

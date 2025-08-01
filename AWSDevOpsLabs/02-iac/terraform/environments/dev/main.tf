@@ -39,8 +39,8 @@ locals {
     public_subnet_count     = 2
     private_subnet_count    = 2
     database_subnet_count   = 2
-    enable_nat_gateway      = true
-    nat_gateway_count       = 1  # Single NAT for cost savings in dev
+    enable_nat_gateway      = false  # Disabled for cost savings - use public subnets for dev
+    nat_gateway_count       = 0
     enable_vpc_endpoints    = false
     enable_flow_logs        = false
   }
@@ -106,6 +106,7 @@ module "web_app" {
   enable_deletion_protection = local.web_app_config.enable_deletion_protection
   log_retention_days        = local.web_app_config.log_retention_days
   environment_variables     = local.web_app_config.environment_variables
+  enable_nat_gateway        = local.vpc_config.enable_nat_gateway
   
   common_tags = local.common_tags
 }

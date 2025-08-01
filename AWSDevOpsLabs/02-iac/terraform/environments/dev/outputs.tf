@@ -30,6 +30,11 @@ output "application_url" {
   value       = module.web_app.application_url
 }
 
+output "web_app_url" {
+  description = "URL to access the web application (alias for application_url)"
+  value       = module.web_app.application_url
+}
+
 output "load_balancer_dns_name" {
   description = "DNS name of the load balancer"
   value       = module.web_app.load_balancer_dns_name

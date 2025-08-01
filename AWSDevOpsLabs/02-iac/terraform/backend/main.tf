@@ -76,6 +76,10 @@ resource "aws_s3_bucket_lifecycle_configuration" "terraform_state" {
     id     = "terraform_state_lifecycle"
     status = "Enabled"
 
+    filter {
+      prefix = ""
+    }
+
     noncurrent_version_expiration {
       noncurrent_days = 90
     }
@@ -165,6 +169,7 @@ resource "local_file" "backend_config" {
     bucket         = aws_s3_bucket.terraform_state.bucket
     region         = data.aws_region.current.name
     dynamodb_table = aws_dynamodb_table.terraform_locks.name
+    key            = "terraform.tfstate"
   })
   filename = "${path.module}/../backend-config.tf"
 }
@@ -178,16 +183,6 @@ resource "local_file" "backend_config_dev" {
     key            = "dev/terraform.tfstate"
   })
   filename = "${path.module}/../environments/dev/backend.tf"
-}
-
-resource "local_file" "backend_config_staging" {
-  content = templatefile("${path.module}/backend-config.tpl", {
-    bucket         = aws_s3_bucket.terraform_state.bucket
-    region         = data.aws_region.current.name
-    dynamodb_table = aws_dynamodb_table.terraform_locks.name
-    key            = "staging/terraform.tfstate"
-  })
-  filename = "${path.module}/../environments/staging/backend.tf"
 }
 
 resource "local_file" "backend_config_prod" {
