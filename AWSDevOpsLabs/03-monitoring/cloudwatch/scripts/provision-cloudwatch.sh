@@ -138,7 +138,31 @@ echo "Important: Check your email and confirm the SNS subscription to receive al
 
 # Generate sample metrics
 echo "Generating sample metrics..."
-cat > "$SCRIPT_DIR/generate-metrics.py" << 'EOF'
+
+# Force use of AWS CLI method since Python detection is problematic on Windows
+PYTHON_AVAILABLE=false
+PYTHON_CMD=""
+
+echo "Using AWS CLI method for generating sample metrics
+if command -v python3 >/dev/null 2>&1; then
+    if python3 --version >/dev/null 2>&1; then
+        PYTHON_AVAILABLE=true
+        PYTHON_CMD="python3"
+    fi
+fi
+
+# If python3 doesn't work, test python
+if [ "$PYTHON_AVAILABLE" = false ] && command -v python >/dev/null 2>&1; then
+    if python --version >/dev/null 2>&1 && python --version 2>&1 | grep -q "Python 3"; then
+        PYTHON_AVAILABLE=true
+        PYTHON_CMD="python"
+    fi
+fi
+
+echo "Python detection: PYTHON_AVAILABLE=$PYTHON_AVAILABLE, PYTHON_CMD=$PYTHON_CMD"
+
+if [ "$PYTHON_AVAILABLE" = true ]; then
+    cat > "$SCRIPT_DIR/generate-metrics.py" << 'EOF'
 #!/usr/bin/env python3
 import boto3
 import random
@@ -198,8 +222,39 @@ if __name__ == "__main__":
         time.sleep(5)  # Wait 5 seconds between metric publications
 EOF
 
-chmod +x "$SCRIPT_DIR/generate-metrics.py"
-python3 "$SCRIPT_DIR/generate-metrics.py" "CustomApp/Performance" 5
+    chmod +x "$SCRIPT_DIR/generate-metrics.py"
+    $PYTHON_CMD "$SCRIPT_DIR/generate-metrics.py" "CustomApp/Performance" 5
+else
+    echo "Python3 not found. Generating sample metrics using AWS CLI instead..."
+    
+    # Generate sample metrics using AWS CLI
+    NAMESPACE="CustomApp/Performance"
+    
+    for i in {1..5}; do
+        # Generate random values (using RANDOM which is available in bash)
+        CPU_USAGE=$((RANDOM % 80 + 10))
+        MEMORY_USAGE=$((RANDOM % 60 + 20))
+        REQUEST_COUNT=$((RANDOM % 150 + 50))
+        RESPONSE_TIME=$((RANDOM % 400 + 100))
+        
+        echo "Publishing metrics set $i: CPU=${CPU_USAGE}%, Memory=${MEMORY_USAGE}%, Requests=${REQUEST_COUNT}, ResponseTime=${RESPONSE_TIME}ms"
+        
+        # Publish metrics using AWS CLI
+        aws cloudwatch put-metric-data --region "$REGION" --namespace "$NAMESPACE" --metric-data \
+            MetricName=CPUUsage,Value=$CPU_USAGE,Unit=Percent \
+            MetricName=MemoryUsage,Value=$MEMORY_USAGE,Unit=Percent \
+            MetricName=RequestCount,Value=$REQUEST_COUNT,Unit=Count \
+            MetricName=ResponseTime,Value=$RESPONSE_TIME,Unit=Milliseconds
+        
+        sleep 5
+    done
+fi
 
 echo "Setup complete! You can now explore the CloudWatch monitoring lab."
-echo "To generate more sample metrics, run: python3 $SCRIPT_DIR/generate-metrics.py"
+
+if [ "$PYTHON_AVAILABLE" = true ]; then
+    echo "To generate more sample metrics, run: $PYTHON_CMD $SCRIPT_DIR/generate-metrics.py"
+else
+    echo "To generate more sample metrics manually, use AWS CLI commands like:"
+    echo "aws cloudwatch put-metric-data --region $REGION --namespace CustomApp/Performance --metric-data MetricName=CPUUsage,Value=75,Unit=Percent"
+fi

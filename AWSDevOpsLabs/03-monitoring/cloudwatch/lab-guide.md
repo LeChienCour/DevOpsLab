@@ -8,7 +8,6 @@ By completing this lab, you will:
 - Create and publish custom CloudWatch metrics from applications
 - Build interactive dashboards to visualize system performance
 - Configure CloudWatch alarms with appropriate thresholds and actions
-- Implement log-based metrics and insights
 - Set up automated responses to monitoring events
 - Deploy monitoring infrastructure using CloudFormation
 - Implement centralized log aggregation from multiple AWS services
@@ -111,8 +110,8 @@ Approximately 45-60 minutes
 1. **Create a simple script to publish custom metrics:**
    ```bash
    # Create a directory for our monitoring scripts
-   mkdir -p ~/cloudwatch-lab
-   cd ~/cloudwatch-lab
+   mkdir -p cloudwatch-lab
+   cd cloudwatch-lab
    ```
 
 2. **Create a custom metrics script:**
@@ -264,51 +263,36 @@ EOF
    aws cloudwatch list-dashboards
    ```
 
-### Step 4: Configure CloudWatch Alarms
+### Step 4: Verify CloudWatch Alarms
 
-1. **Create an alarm for high CPU usage:**
+The CloudFormation stack has already created the following alarms for you:
+
+1. **List all existing alarms:**
    ```bash
-   aws cloudwatch put-metric-alarm \
-     --alarm-name "CustomApp-HighCPU" \
-     --alarm-description "Alarm when CPU exceeds 80%" \
-     --metric-name CPUUsage \
-     --namespace CustomApp/Performance \
-     --statistic Average \
-     --period 300 \
-     --threshold 80 \
-     --comparison-operator GreaterThanThreshold \
-     --evaluation-periods 2 \
-     --alarm-actions arn:aws:sns:us-east-1:YOUR_ACCOUNT_ID:cloudwatch-alarms-topic
+   aws cloudwatch describe-alarms --alarm-name-prefix "cloudwatch-monitoring-lab"
    ```
 
-2. **Create an alarm for high response time:**
+2. **Check specific alarm details:**
    ```bash
-   aws cloudwatch put-metric-alarm \
-     --alarm-name "CustomApp-HighResponseTime" \
-     --alarm-description "Alarm when response time exceeds 400ms" \
-     --metric-name ResponseTime \
-     --namespace CustomApp/Performance \
-     --statistic Average \
-     --period 300 \
-     --threshold 400 \
-     --comparison-operator GreaterThanThreshold \
-     --evaluation-periods 1 \
-     --alarm-actions arn:aws:sns:us-east-1:YOUR_ACCOUNT_ID:cloudwatch-alarms-topic
+   # High CPU Alarm
+   aws cloudwatch describe-alarms --alarm-names "cloudwatch-monitoring-lab-HighCPU"
+   
+   # High Memory Alarm  
+   aws cloudwatch describe-alarms --alarm-names "cloudwatch-monitoring-lab-HighMemory"
+   
+   # High Response Time Alarm
+   aws cloudwatch describe-alarms --alarm-names "cloudwatch-monitoring-lab-HighResponseTime"
+   
+   # Error Count Alarm
+   aws cloudwatch describe-alarms --alarm-names "cloudwatch-monitoring-lab-ErrorCount"
+   
+   # Composite System Health Alarm
+   aws cloudwatch describe-alarms --alarm-names "cloudwatch-monitoring-lab-SystemHealth"
    ```
 
-3. **Create a composite alarm:**
+3. **View alarm states:**
    ```bash
-   aws cloudwatch put-composite-alarm \
-     --alarm-name "CustomApp-SystemHealth" \
-     --alarm-description "Overall system health check" \
-     --alarm-rule "(ALARM('CustomApp-HighCPU') OR ALARM('CustomApp-HighResponseTime'))" \
-     --actions-enabled \
-     --alarm-actions arn:aws:sns:us-east-1:YOUR_ACCOUNT_ID:cloudwatch-alarms-topic
-   ```
-
-4. **List all alarms to verify creation:**
-   ```bash
-   aws cloudwatch describe-alarms --alarm-names "CustomApp-HighCPU" "CustomApp-HighResponseTime" "CustomApp-SystemHealth"
+   aws cloudwatch describe-alarms --state-value ALARM
    ```
 
 ### Step 5: Test Alarm Functionality
@@ -347,14 +331,14 @@ EOF
 3. **Monitor alarm state:**
    ```bash
    # Check alarm state (may take a few minutes to trigger)
-   aws cloudwatch describe-alarms --alarm-names "CustomApp-HighCPU" --query 'MetricAlarms[0].StateValue'
+   aws cloudwatch describe-alarms --alarm-names "cloudwatch-monitoring-lab-HighCPU" --query 'MetricAlarms[0].StateValue'
    ```
 
 ### Step 6: Explore CloudWatch Insights
 
 1. **Create a log group for application logs:**
    ```bash
-   aws logs create-log-group --log-group-name "/aws/customapp/application"
+   aws logs create-log-group --log-group-name /aws/customapp/application
    ```
 
 2. **Create sample log entries:**
@@ -407,16 +391,6 @@ EOF
    python3 generate-logs.py
    ```
 
-4. **Query logs using CloudWatch Insights:**
-   ```bash
-   # Start a query (replace START_TIME and END_TIME with appropriate epoch timestamps)
-   aws logs start-query \
-     --log-group-name "/aws/customapp/application" \
-     --start-time 1640995200 \
-     --end-time 1640998800 \
-     --query-string 'fields @timestamp, message | filter message like /response_time/ | sort @timestamp desc'
-   ```
-
 ## Troubleshooting Guide
 
 ### Common Issues and Solutions
@@ -436,7 +410,7 @@ EOF
    - Verify the alarm threshold and comparison operator
    - Check that the metric has sufficient data points for evaluation
    - Confirm SNS topic ARN is correct and subscription is confirmed
-   - Review alarm history: `aws cloudwatch describe-alarm-history --alarm-name "CustomApp-HighCPU"`
+   - Review alarm history: `aws cloudwatch describe-alarm-history --alarm-name "cloudwatch-monitoring-lab-HighCPU"`
 
 4. **SNS notifications not received:**
    - Check spam folder for confirmation and alarm emails
@@ -462,7 +436,7 @@ aws cloudwatch get-metric-statistics \
 aws cloudwatch list-metrics --namespace "CustomApp/Performance"
 
 # Check alarm history
-aws cloudwatch describe-alarm-history --alarm-name "CustomApp-HighCPU"
+aws cloudwatch describe-alarm-history --alarm-name "cloudwatch-monitoring-lab-HighCPU"
 ```
 
 ## Resources Created
@@ -599,7 +573,8 @@ Key concepts to remember:
    # Get the centralized log group name
    CENTRAL_LOG_GROUP=$(aws cloudformation describe-stacks --stack-name cloudwatch-log-aggregation-lab --query "Stacks[0].Outputs[?OutputKey=='CentralizedLogGroupName'].OutputValue" --output text)
    
-   # Query the centralized logs
+   # Query the centralized logs (with Windows Git Bash workaround)
+   export MSYS_NO_PATHCONV=1
    aws logs start-query \
      --log-group-name "$CENTRAL_LOG_GROUP" \
      --start-time $(date -d '1 hour ago' +%s) \
@@ -615,13 +590,22 @@ Key concepts to remember:
 
 4. **Create a log metric filter for error tracking:**
    ```bash
-   # Create a metric filter for errors across all services
+   # Create a metric filter for errors across all services (with Windows Git Bash workaround)
+   export MSYS_NO_PATHCONV=1
    aws logs put-metric-filter \
      --log-group-name "$CENTRAL_LOG_GROUP" \
      --filter-name "AllServicesErrors" \
      --filter-pattern "ERROR" \
      --metric-transformations \
          metricName=AllErrors,metricNamespace=LogMetrics/Centralized,metricValue=1
+   
+   # Alternative: Use the log group name directly (replace with actual value)
+   # aws logs put-metric-filter \
+   #   --log-group-name "/aws/centralized/Dev" \
+   #   --filter-name "AllServicesErrors" \
+   #   --filter-pattern "ERROR" \
+   #   --metric-transformations \
+   #       metricName=AllErrors,metricNamespace=LogMetrics/Centralized,metricValue=1
    ```
 
 ### Step 8: Generate Dynamic Dashboards Based on Infrastructure
@@ -715,3 +699,188 @@ aws cloudwatch put-metric-alarm \
   --threshold-metric-id "ad1" \
   --anomaly-detection-threshold 2
 ```
+#
+# Lab Cleanup
+
+**⚠️ Important: Complete this cleanup section to avoid ongoing AWS charges!**
+
+### Step 1: Stop Running Scripts
+
+First, stop any running Python scripts that are generating metrics and logs:
+
+```bash
+# Find and kill the Python processes
+pkill -f publish-metrics.py
+pkill -f generate-logs.py
+pkill -f dashboard-generator.py
+
+# Verify no processes are running
+ps aux | grep -E "(publish-metrics|generate-logs|dashboard-generator)"
+```
+
+### Step 2: Delete CloudFormation Stacks
+
+Delete the CloudFormation stacks in the correct order (dependencies first):
+
+```bash
+# Delete the main monitoring stack
+aws cloudformation delete-stack --stack-name cloudwatch-monitoring-lab
+
+# Delete the log aggregation stack
+aws cloudformation delete-stack --stack-name cloudwatch-log-aggregation-lab
+
+# Wait for stacks to be deleted (this may take several minutes)
+aws cloudformation wait stack-delete-complete --stack-name cloudwatch-monitoring-lab
+aws cloudformation wait stack-delete-complete --stack-name cloudwatch-log-aggregation-lab
+
+# Verify stacks are deleted
+aws cloudformation list-stacks --stack-status-filter DELETE_COMPLETE
+```
+
+### Step 3: Clean Up Manual Resources
+
+Remove any resources that were created manually during the lab:
+
+```bash
+# Delete any custom alarms created manually
+aws cloudwatch delete-alarms --alarm-names "CustomApp-HighCPU" "CustomApp-HighResponseTime" "CustomApp-SystemHealth" 2>/dev/null || true
+
+# Delete any custom dashboards
+aws cloudwatch delete-dashboards --dashboard-names "InfrastrcutureDashboard" "CustomAppDashboard" "CustomApp-Performance-Dashboard" 2>/dev/null || true
+
+# List remaining dashboards to verify cleanup
+aws cloudwatch list-dashboards
+```
+
+### Step 4: Clean Up Log Groups (Optional)
+
+**Note**: Log groups created by CloudFormation should be automatically deleted, but you can verify:
+
+```bash
+# List remaining log groups
+aws logs describe-log-groups --log-group-name-prefix "/aws/customapp" --query 'logGroups[].logGroupName'
+aws logs describe-log-groups --log-group-name-prefix "/aws/CustomApp" --query 'logGroups[].logGroupName'
+aws logs describe-log-groups --log-group-name-prefix "/aws/centralized" --query 'logGroups[].logGroupName'
+
+# If any remain, delete them manually (be careful!)
+# aws logs delete-log-group --log-group-name "/aws/customapp/application"
+```
+
+### Step 5: Verify Complete Cleanup
+
+Run these commands to ensure all resources are cleaned up:
+
+```bash
+# Check for remaining CloudWatch alarms
+aws cloudwatch describe-alarms --query 'MetricAlarms[?contains(AlarmName, `cloudwatch-monitoring-lab`) || contains(AlarmName, `CustomApp`)].AlarmName'
+
+# Check for remaining dashboards
+aws cloudwatch list-dashboards --query 'DashboardEntries[?contains(DashboardName, `cloudwatch-monitoring-lab`) || contains(DashboardName, `CustomApp`)].DashboardName'
+
+# Check for remaining SNS topics
+aws sns list-topics --query 'Topics[?contains(TopicArn, `cloudwatch-monitoring-lab`) || contains(TopicArn, `alarms`)].TopicArn'
+
+# Check for remaining Lambda functions
+aws lambda list-functions --query 'Functions[?contains(FunctionName, `log-processor`)].FunctionName'
+```
+
+### Step 6: Clean Up Local Files
+
+Remove the local lab files and scripts:
+
+```bash
+# Navigate back to your home directory
+cd ~
+
+# Remove the lab directory (be careful with this command!)
+rm -rf cloudwatch-lab/
+
+# Remove any downloaded scripts
+rm -f publish-metrics.py generate-logs.py trigger-alarm.py dashboard-generator.py
+```
+
+### Step 7: Unsubscribe from SNS Notifications
+
+If you subscribed to SNS notifications during the lab:
+
+1. **Check your email** for any remaining SNS subscription confirmation emails
+2. **Click "Unsubscribe"** in any notification emails you received
+3. **Or unsubscribe via AWS CLI**:
+   ```bash
+   # List your subscriptions
+   aws sns list-subscriptions --query 'Subscriptions[?contains(TopicArn, `alarms`)].SubscriptionArn'
+   
+   # Unsubscribe (replace SUBSCRIPTION_ARN with actual ARN)
+   # aws sns unsubscribe --subscription-arn "SUBSCRIPTION_ARN"
+   ```
+
+### Cleanup Verification Checklist
+
+- [ ] All Python scripts stopped
+- [ ] CloudFormation stacks deleted
+- [ ] Manual alarms deleted
+- [ ] Custom dashboards deleted
+- [ ] SNS subscriptions cancelled
+- [ ] Local files removed
+- [ ] No unexpected AWS charges in billing dashboard
+
+### Cost Monitoring
+
+After cleanup, monitor your AWS bill for the next few days to ensure no resources are still incurring charges:
+
+1. **AWS Billing Dashboard**: Check for any CloudWatch, SNS, or Lambda charges
+2. **AWS Cost Explorer**: Look for spikes in monitoring-related services
+3. **AWS Budgets**: Set up a budget alert if you haven't already
+
+### Troubleshooting Cleanup Issues
+
+If you encounter issues during cleanup:
+
+**Stack deletion fails:**
+```bash
+# Check stack events for errors
+aws cloudformation describe-stack-events --stack-name cloudwatch-monitoring-lab
+
+# Force delete if necessary (use with caution)
+aws cloudformation cancel-update-stack --stack-name cloudwatch-monitoring-lab
+```
+
+**Resources not deleting:**
+- Some resources may have dependencies that prevent deletion
+- Check the CloudFormation console for detailed error messages
+- You may need to delete dependent resources manually first
+
+**Persistent charges:**
+- Check CloudWatch Logs retention settings
+- Verify all Lambda functions are deleted
+- Ensure no custom metrics are still being published
+
+---
+
+## Summary
+
+Congratulations! You have successfully completed the CloudWatch Monitoring Lab. You learned how to:
+
+✅ **Deploy monitoring infrastructure** using CloudFormation  
+✅ **Publish custom metrics** to CloudWatch  
+✅ **Create and configure alarms** with SNS notifications  
+✅ **Build dashboards** for visualization  
+✅ **Implement log aggregation** and centralized logging  
+✅ **Query logs** using CloudWatch Insights  
+✅ **Set up composite alarms** for complex monitoring scenarios  
+✅ **Clean up resources** to avoid unnecessary costs  
+
+### Next Steps
+
+- Explore **CloudWatch Container Insights** for ECS/EKS monitoring
+- Learn about **AWS X-Ray** for distributed tracing
+- Implement **Infrastructure as Code** for monitoring across environments
+- Set up **cross-account monitoring** for multi-account architectures
+- Explore **third-party monitoring tools** that integrate with CloudWatch
+
+### Additional Resources
+
+- [CloudWatch User Guide](https://docs.aws.amazon.com/cloudwatch/)
+- [CloudWatch Logs User Guide](https://docs.aws.amazon.com/logs/)
+- [CloudWatch Best Practices](https://docs.aws.amazon.com/cloudwatch/latest/monitoring/cloudwatch_best_practices.html)
+- [AWS Monitoring and Observability](https://aws.amazon.com/products/management-and-governance/use-cases/monitoring-and-observability/)

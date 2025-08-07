@@ -218,7 +218,7 @@ Resources:
               "width": 24,
               "height": 2,
               "properties": {
-                "markdown": "# Application Performance Dashboard\nEnvironment: ${Environment} | Last Updated: ${'$'}{Date.now()}"
+                "markdown": "# Application Performance Dashboard\nEnvironment: ${Environment}"
               }
             },
             {
@@ -301,11 +301,11 @@ Resources:
               "height": 6,
               "properties": {
                 "alarms": [
-                  "${HighCPUAlarm}",
-                  "${HighMemoryAlarm}",
-                  "${HighResponseTimeAlarm}",
-                  "${ErrorCountAlarm}",
-                  "${SystemHealthCompositeAlarm}"
+                  "arn:aws:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:${HighCPUAlarm}",
+                  "arn:aws:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:${HighMemoryAlarm}",
+                  "arn:aws:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:${HighResponseTimeAlarm}",
+                  "arn:aws:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:${ErrorCountAlarm}",
+                  "arn:aws:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:${SystemHealthCompositeAlarm}"
                 ],
                 "title": "System Alarms"
               }

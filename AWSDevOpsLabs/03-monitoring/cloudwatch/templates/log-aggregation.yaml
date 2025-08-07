@@ -37,12 +37,25 @@ Resources:
             Principal:
               Service:
                 - lambda.amazonaws.com
-                - apigateway.amazonaws.com
-                - ec2.amazonaws.com
-                - ecs-tasks.amazonaws.com
             Action: sts:AssumeRole
       ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/CloudWatchLogsFullAccess
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: CloudWatchLogsPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:DescribeLogStreams
+                Resource: 
+                  - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/centralized/${Environment}:*"
+              - Effect: Allow
+                Action:
+                  - sqs:SendMessage
+                Resource: !GetAtt LogProcessorDLQ.Arn
       Tags:
         - Key: Environment
           Value: !Ref Environment
@@ -134,6 +147,16 @@ Resources:
         - Key: Environment
           Value: !Ref Environment
 
+  # Dead Letter Queue for failed log processing
+  LogProcessorDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "${Environment}-log-processor-dlq"
+      MessageRetentionPeriod: 1209600  # 14 days
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
   # Lambda Function for Log Processing
   LogProcessorFunction:
     Type: AWS::Lambda::Function
@@ -141,72 +164,105 @@ Resources:
       FunctionName: !Sub "${Environment}-log-processor"
       Handler: index.handler
       Role: !GetAtt CloudWatchLogsRole.Arn
-      Runtime: nodejs14.x
+      Runtime: nodejs18.x
       Timeout: 60
-      MemorySize: 128
+      MemorySize: 256
+      DeadLetterConfig:
+        TargetArn: !GetAtt LogProcessorDLQ.Arn
       Environment:
         Variables:
           DESTINATION_LOG_GROUP: !Ref CentralizedLogGroup
           ENVIRONMENT: !Ref Environment
       Code:
         ZipFile: |
+          const zlib = require('zlib');
+          // Use AWS SDK v2 which is available in Lambda runtime
+          const AWS = require('aws-sdk');
+          const cloudwatchlogs = new AWS.CloudWatchLogs();
+          
           exports.handler = async (event, context) => {
-              const zlib = require('zlib');
-              const aws = require('aws-sdk');
-              const cloudwatchlogs = new aws.CloudWatchLogs();
-              
-              // Decode and decompress the log data
-              const payload = Buffer.from(event.awslogs.data, 'base64');
-              const decompressed = zlib.gunzipSync(payload).toString('utf8');
-              const logData = JSON.parse(decompressed);
-              
-              // Process and enrich log events
-              const logEvents = logData.logEvents.map(event => {
-                  let parsedMessage;
-                  try {
-                      parsedMessage = JSON.parse(event.message);
-                  } catch (e) {
-                      parsedMessage = { rawMessage: event.message };
-                  }
+              try {
+                  console.log('Processing log event:', JSON.stringify(event, null, 2));
                   
-                  return {
-                      timestamp: event.timestamp,
-                      message: JSON.stringify({
-                          ...parsedMessage,
-                          sourceLogGroup: logData.logGroup,
-                          sourceLogStream: logData.logStream,
-                          environment: process.env.ENVIRONMENT,
-                          enhancedTimestamp: new Date(event.timestamp).toISOString()
-                      })
-                  };
-              });
-              
-              // Write to centralized log group
-              if (logEvents.length > 0) {
-                  const params = {
-                      logGroupName: process.env.DESTINATION_LOG_GROUP,
-                      logStreamName: `${logData.logGroup.replace(/\//g, '-')}-${Date.now()}`,
-                      logEvents: logEvents
-                  };
+                  // Decode and decompress the log data
+                  const payload = Buffer.from(event.awslogs.data, 'base64');
+                  const decompressed = zlib.gunzipSync(payload).toString('utf8');
+                  const logData = JSON.parse(decompressed);
                   
-                  try {
-                      // Create log stream if it doesn't exist
-                      await cloudwatchlogs.createLogStream({
-                          logGroupName: process.env.DESTINATION_LOG_GROUP,
-                          logStreamName: params.logStreamName
-                      }).promise().catch(() => {});
+                  console.log('Decompressed log data:', JSON.stringify(logData, null, 2));
+                  
+                  // Process and enrich log events
+                  const logEvents = logData.logEvents.map(logEvent => {
+                      let parsedMessage;
+                      try {
+                          parsedMessage = JSON.parse(logEvent.message);
+                      } catch (e) {
+                          parsedMessage = { rawMessage: logEvent.message };
+                      }
+                      
+                      return {
+                          timestamp: logEvent.timestamp,
+                          message: JSON.stringify({
+                              ...parsedMessage,
+                              sourceLogGroup: logData.logGroup,
+                              sourceLogStream: logData.logStream,
+                              environment: process.env.ENVIRONMENT,
+                              enhancedTimestamp: new Date(logEvent.timestamp).toISOString(),
+                              processedAt: new Date().toISOString()
+                          })
+                      };
+                  });
+                  
+                  // Write to centralized log group
+                  if (logEvents.length > 0) {
+                      const logStreamName = `${logData.logGroup.replace(/[\/\:]/g, '-')}-${Date.now()}`;
+                      
+                      try {
+                          // Create log stream
+                          await cloudwatchlogs.createLogStream({
+                              logGroupName: process.env.DESTINATION_LOG_GROUP,
+                              logStreamName: logStreamName
+                          }).promise();
+                          console.log(`Created log stream: ${logStreamName}`);
+                      } catch (error) {
+                          if (error.code !== 'ResourceAlreadyExistsException') {
+                              console.error('Error creating log stream:', error);
+                              throw error;
+                          }
+                      }
                       
                       // Put log events
-                      await cloudwatchlogs.putLogEvents(params).promise();
+                      await cloudwatchlogs.putLogEvents({
+                          logGroupName: process.env.DESTINATION_LOG_GROUP,
+                          logStreamName: logStreamName,
+                          logEvents: logEvents
+                      }).promise();
+                      
                       console.log(`Successfully processed ${logEvents.length} log events`);
-                      return { status: 'success', processed: logEvents.length };
-                  } catch (error) {
-                      console.error('Error writing to centralized logs:', error);
-                      throw error;
+                      return { 
+                          statusCode: 200,
+                          body: JSON.stringify({ 
+                              status: 'success', 
+                              processed: logEvents.length,
+                              logStreamName: logStreamName
+                          })
+                      };
                   }
+                  
+                  return { 
+                      statusCode: 200,
+                      body: JSON.stringify({ status: 'success', processed: 0 })
+                  };
+              } catch (error) {
+                  console.error('Error processing logs:', error);
+                  return {
+                      statusCode: 500,
+                      body: JSON.stringify({ 
+                          status: 'error', 
+                          message: error.message 
+                      })
+                  };
               }
-              
-              return { status: 'success', processed: 0 };
           };
       Tags:
         - Key: Environment
@@ -224,6 +280,7 @@ Resources:
   # Log Subscription Filters to send logs to the centralized processor
   LambdaLogSubscription:
     Type: AWS::Logs::SubscriptionFilter
+    DependsOn: LambdaPermission
     Properties:
       LogGroupName: !Ref LambdaLogGroup
       FilterPattern: ""
@@ -231,6 +288,7 @@ Resources:
 
   APIGatewayLogSubscription:
     Type: AWS::Logs::SubscriptionFilter
+    DependsOn: LambdaPermission
     Properties:
       LogGroupName: !Ref APIGatewayLogGroup
       FilterPattern: ""
@@ -238,6 +296,7 @@ Resources:
 
   EC2LogSubscription:
     Type: AWS::Logs::SubscriptionFilter
+    DependsOn: LambdaPermission
     Properties:
       LogGroupName: !Ref EC2LogGroup
       FilterPattern: ""
@@ -245,6 +304,7 @@ Resources:
 
   ECSLogSubscription:
     Type: AWS::Logs::SubscriptionFilter
+    DependsOn: LambdaPermission
     Properties:
       LogGroupName: !Ref ECSLogGroup
       FilterPattern: ""
@@ -266,7 +326,7 @@ Resources:
               "width": 24,
               "height": 2,
               "properties": {
-                "markdown": "# Centralized Logging Dashboard\nEnvironment: ${Environment} | Last Updated: ${'$'}{Date.now()}"
+                "markdown": "# Centralized Logging Dashboard\\nEnvironment: ${Environment}"
               }
             },
             {
@@ -294,7 +354,7 @@ Resources:
               "width": 12,
               "height": 6,
               "properties": {
-                "query": "SOURCE '/aws/centralized/${Environment}' | fields @timestamp, @message\n| sort @timestamp desc\n| filter @message like /ERROR/\n| limit 20",
+                "query": "SOURCE '/aws/centralized/${Environment}' | fields @timestamp, @message\\n| sort @timestamp desc\\n| filter @message like /ERROR/\\n| limit 20",
                 "region": "${AWS::Region}",
                 "title": "Recent Error Logs",
                 "view": "table"
@@ -307,7 +367,7 @@ Resources:
               "width": 24,
               "height": 8,
               "properties": {
-                "query": "SOURCE '/aws/centralized/${Environment}' | stats count(*) as logCount by sourceLogGroup, bin(30m)\n| sort logCount desc",
+                "query": "SOURCE '/aws/centralized/${Environment}' | stats count(*) as logCount by sourceLogGroup, bin(30m)\\n| sort logCount desc",
                 "region": "${AWS::Region}",
                 "title": "Log Volume by Source",
                 "view": "table"
@@ -320,7 +380,7 @@ Resources:
               "width": 24,
               "height": 8,
               "properties": {
-                "query": "SOURCE '/aws/centralized/${Environment}' | fields @timestamp, sourceLogGroup, environment, enhancedTimestamp\n| sort @timestamp desc\n| limit 100",
+                "query": "SOURCE '/aws/centralized/${Environment}' | fields @timestamp, sourceLogGroup, environment, enhancedTimestamp\\n| sort @timestamp desc\\n| limit 100",
                 "region": "${AWS::Region}",
                 "title": "Recent Logs",
                 "view": "table"
@@ -345,3 +405,11 @@ Outputs:
     Description: URL to the Logs Dashboard (if created)
     Condition: CreateDashboardCondition
     Value: !Sub "https://${AWS::Region}.console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#dashboards:name=${LogsDashboard}"
+  
+  DeadLetterQueueArn:
+    Description: ARN of the Dead Letter Queue for failed log processing
+    Value: !GetAtt LogProcessorDLQ.Arn
+  
+  DeadLetterQueueURL:
+    Description: URL of the Dead Letter Queue for failed log processing
+    Value: !Ref LogProcessorDLQ
