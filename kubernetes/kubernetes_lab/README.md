@@ -23,6 +23,10 @@ Welcome to the Kubernetes Laboratory Series! This set of hands-on labs will guid
 13. [Lab 13: Introduction to Helm](./lab13-helm-intro/README.md)
 14. [Lab 14: Creating Your First Helm Chart](./lab14-helm-chart/README.md)
 15. [Lab 15: Advanced Helm Usage](./lab15-helm-advanced/README.md)
+16. [Lab 16: Certificates and TLS Management](./lab16-certificates/README.md)
+17. [Lab 17: Network Policies](./lab17-network-policies/README.md)
+18. [Lab 18: ETCD Backup and Restore](./lab18-etcd-backup-restore/README.md)
+19. [Lab 19: Troubleshooting](./lab19-troubleshooting/README.md)
 
 ## General Study Resources
 - [Kubernetes Official Documentation](https://kubernetes.io/docs/)
